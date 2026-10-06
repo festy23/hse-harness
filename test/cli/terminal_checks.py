@@ -69,7 +69,7 @@ class Terminal:
 
 with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
     root = Path(directory)
-    cli = str(project / 'src/cli.ts')
+    cli = str(project / 'scripts/harness.mjs')
     # Fresh menu chooses configure, cancel during a section returns to the menu.
     terminal = Terminal(root, [cli], columns=48)
     terminal.expect('HSE HARNESS')

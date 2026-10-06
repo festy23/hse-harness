@@ -15,7 +15,7 @@
     "check": "npm run typecheck && npm test",
     "test:e2e": "npm run build && node test/e2e/run.mjs --calendar=icloud && node test/e2e/run.mjs --calendar=google && node test/e2e/run.mjs --calendar=yandex && node test/e2e/run.mjs --calendar=icloud --startup-pending",
     "setup": "tsx src/setup.ts",
-    "harness": "tsx src/cli.ts",
+    "harness": "node scripts/harness.mjs",
     "eval": "tsx src/evaluate.ts"
   },
   "dependencies": {

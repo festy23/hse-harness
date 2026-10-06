@@ -1,0 +1,7 @@
+#!/bin/sh
+if ! command -v node >/dev/null 2>&1; then
+  printf '%s\n' 'HSE HARNESS: установи Node.js 22.19.0 или новее вместе с npm.' >&2
+  exit 1
+fi
+task_root=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
+exec node "$task_root/scripts/harness.mjs" "$@"

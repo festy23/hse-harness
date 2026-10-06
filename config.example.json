@@ -1,0 +1,17 @@
+{
+  "ownerId": 0,
+  "profile": {
+    "name": "Иван", "university": "ВШЭ ФКН", "program": "Программная инженерия", "group": "БПИ243",
+    "course": 3, "academicYear": "2026/27", "subjects": "Кодинговые агенты в разработке",
+    "details": "Набор 2024; поток C#; майнор: Финансовые рынки; НИС: Нейроинформатика"
+  },
+  "chats": [],
+  "features": {"googleCalendar": false, "icloudCalendar": true, "yandexCalendar": false},
+  "calendars": {
+    "timetable": {"provider": "icloud", "id": "your-icloud-timetable-url"},
+    "agent": {"provider": "icloud", "id": "your-icloud-agent-calendar-url"}
+  },
+  "folders": [],
+  "model": "choose-with-setup-models",
+  "pollSeconds": 60
+}

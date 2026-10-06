@@ -1,0 +1,21 @@
+[Unit]
+Description=HSE Personal Study Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=study
+Group=study
+WorkingDirectory=/opt/hse-study-assistant
+ExecStart=/usr/bin/env node dist/main.js
+Environment=NODE_ENV=production
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=50
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

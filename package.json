@@ -1,0 +1,40 @@
+{
+  "name": "hse-study-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "test:e2e": "npm run build && node test/e2e/run.mjs --calendar=icloud && node test/e2e/run.mjs --calendar=google && node test/e2e/run.mjs --calendar=yandex && node test/e2e/run.mjs --calendar=icloud --startup-pending",
+    "setup": "tsx src/setup.ts",
+    "harness": "tsx src/cli.ts",
+    "eval": "tsx src/evaluate.ts"
+  },
+  "dependencies": {
+    "@clack/prompts": "1.8.1",
+    "@earendil-works/pi-coding-agent": "1.0.2",
+    "big-integer": "1.6.52",
+    "dotenv": "18.0.5",
+    "html-to-text": "10.0.1",
+    "ical.js": "2.2.1",
+    "imapflow": "2.2.4",
+    "node-ical": "0.27.3",
+    "teleproto": "1.229.1",
+    "tsdav": "2.4.0",
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "9.0.4",
+    "@types/node": "26.6.4",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}

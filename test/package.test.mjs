@@ -20,7 +20,9 @@ test('actual npm archive installs with runtime dependencies only, exposes CLI, s
   try {
     const packed = run(npm, ['pack', '--json', '--ignore-scripts', '--pack-destination', root], { cwd: project });
     assert.equal(packed.code, 0, packed.output);
-    const [manifest] = JSON.parse(packed.stdout); const archive = join(root, manifest.filename);
+    const packedJSON = JSON.parse(packed.stdout);
+    const [manifest] = Array.isArray(packedJSON) ? packedJSON : Object.values(packedJSON);
+    const archive = join(root, manifest.filename);
     assert.equal(manifest.name, '@ivan-boss/hse-harness');
     assert.ok(manifest.files.some(file => file.path === 'bin/hse-harness.mjs'));
     assert.ok(!manifest.files.some(file => /^(data|secrets|src|test)\//.test(file.path) || file.path === '.env' || file.path === 'config.local.json'));

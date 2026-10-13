@@ -7,7 +7,8 @@ const metadata = JSON.parse(readFileSync(new URL('../package.json', import.meta.
 if (metadata.name !== '@ivan-boss/hse-harness' || metadata.private) throw new Error('Неверные параметры публичного пакета');
 const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
 if (result.status !== 0) throw new Error('Не удалось проверить состав npm-пакета');
-const [{ files }] = JSON.parse(result.stdout);
+const parsed = JSON.parse(result.stdout);
+const [{ files }] = Array.isArray(parsed) ? parsed : Object.values(parsed);
 const paths = files.map(file => file.path);
 for (const path of paths.filter(path => !path.startsWith('node_modules/'))) {
   if (/(^|\/)(data|secrets|node_modules|src|test|\.git)(\/|$)/.test(path) ||

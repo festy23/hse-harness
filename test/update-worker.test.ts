@@ -112,3 +112,12 @@ test('bot identity namespaces reused update IDs, resets offset only at activatio
   await candidate.enqueueOwner('duplicate',10);assert.equal(candidate.state.queue.length,2);
   const recovered=new Store(store.dir);await recovered.load({readOnly:true});assert.equal(recovered.state.botIdentity,newBot);assert.equal(recovered.state.botOffset,11);
 }));
+
+test('failed source turn cannot borrow a later successful priority-owner response during JSONL recovery',async()=>{
+  const {SessionManager}=await import('@earendil-works/pi-coding-agent');const {PiAssistant}=await import('../src/pi.js');const pi=new PiAssistant();pi.manager=SessionManager.inMemory();
+  const assistant=(text:string,stopReason:'stop'|'error')=>({role:'assistant' as const,content:text?[{type:'text' as const,text}]:[],api:'openai-responses' as const,provider:'openai',model:'fixture',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason,timestamp:2,...(stopReason==='error'?{errorMessage:'Provider unavailable'}:{})});
+  pi.manager.appendCustomEntry('hse-operation-start',{turnId:'source-d'});pi.manager.appendMessage({role:'user',content:'ДЗ D до 16 октября',timestamp:1});pi.manager.appendMessage(assistant('','error'));
+  pi.manager.appendCustomEntry('hse-operation-start',{turnId:'owner-priority'});pi.manager.appendMessage({role:'user',content:'Ответь владельцу первым',timestamp:3});pi.manager.appendMessage(assistant('Приоритетный личный ответ.','stop'));pi.manager.appendCustomEntry('hse-operation-result',{turnId:'owner-priority',answer:'Приоритетный личный ответ.'});
+  assert.equal(pi.completedTurn('source-d'),undefined);assert.equal(pi.completedTurn('owner-priority'),'Приоритетный личный ответ.');
+  assert.equal(pi.manager.getEntries().filter(e=>e.type==='custom'&&e.customType==='hse-operation-result'&&(e.data as {turnId?:string}).turnId==='source-d').length,0);
+});

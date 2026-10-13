@@ -111,7 +111,10 @@ export class PiAssistant {
         if(data?.turnId===turnId&&typeof data.answer==='string')return data.answer;
       }
       if(e.type==='custom'&&e.customType==='hse-operation-start'&&(e.data as {turnId?:string})?.turnId===turnId){
-        const following=entries.slice(i+1);
+        // A later priority owner turn can finish while this source operation is
+        // still queued. Its assistant response is not this operation's result.
+        const nextOperation=entries.findIndex((entry,index)=>index>i&&entry.type==='custom'&&entry.customType==='hse-operation-start');
+        const following=entries.slice(i+1,nextOperation<0?undefined:nextOperation);
         const messages=following.filter(entry=>entry.type==='message').map(entry=>entry.message);
         if(messages.some(message=>message.role==='toolResult'&&message.isError))return undefined;
         const last=messages.at(-1);

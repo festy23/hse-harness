@@ -18,7 +18,7 @@ test('actual npm archive installs with runtime dependencies only, exposes CLI, s
     return { code: result.status, output: result.stdout + result.stderr, stdout: result.stdout };
   };
   try {
-    const packed = run(npm, ['pack', '--json', '--ignore-scripts', '--pack-destination', root], { cwd: project });
+    const packed = run(npm, ['pack', '--json', '--ignore-scripts', '--pack-destination', root, ...(process.env.HSE_PACKAGE_ARCHIVE ? [process.env.HSE_PACKAGE_ARCHIVE] : [])], { cwd: project });
     assert.equal(packed.code, 0, packed.output);
     const packedJSON = JSON.parse(packed.stdout);
     const [manifest] = Array.isArray(packedJSON) ? packedJSON : Object.values(packedJSON);

@@ -131,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
 
     # Ctrl+C while the foreground runner owns a child is forwarded once and awaited.
     child_script = root / 'child.mjs'
-    child_script.write_text("console.log('CHILD_READY'); process.once('SIGINT',()=>{console.log('CHILD_STOPPED');setTimeout(()=>process.exit(0),100)}); setInterval(()=>{},1000);")
+    child_script.write_text("process.once('SIGINT',()=>{console.log('CHILD_STOPPED');setTimeout(()=>process.exit(0),100)}); setInterval(()=>{},1000); console.log('CHILD_READY');")
     runner = "import {runProcess} from " + json.dumps(str(project / 'src/cli/service.ts')) + "; const code=await runProcess(process.execPath,[" + json.dumps(str(child_script)) + "],process.cwd()); console.log('RUNNER_EXIT:'+code);"
     terminal = Terminal(root, ['--input-type=module', '-e', runner])
     terminal.expect('CHILD_READY')

@@ -24,7 +24,7 @@ async function main():Promise<void> {
     if(previous===value)return;
     store.state.health[component]=value;await store.save();
     if(error) {
-      const detail=error instanceof Error&&/^(Требуется подписочный вход:|Модель отсутствует в каталоге:|Выберите модель из npm run setup -- models)/.test(error.message)?`\n${error.message}`:'';
+      const detail=error instanceof Error&&/^(Требуется подписочный вход:|Модель отсутствует в каталоге:|Выберите модель через)/.test(error.message)?`\n${error.message}`:'';
       await bot.send(`${component}: сейчас недоступен. Обработка этой части задерживается; после восстановления продолжу с сохраненной позиции.${component==='Модель'?' Проверь подписочный вход и выбранную модель; если исчерпан лимит подписки, нужен его сброс/твое вмешательство.':''}${detail}`).catch(()=>{});
     }
     else if(previous==='unavailable' && store.state.bootstrapFinished) await bot.send(`${component}: работа восстановлена.`).catch(()=>{});

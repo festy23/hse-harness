@@ -45,7 +45,7 @@ export async function loginSubscription(runtime:ModelRuntime,interaction:Paramet
   await runtime.login('openai','oauth',interaction,{getDeviceId:()=>deviceId});
 }
 export async function subscriptionModels(runtime:ModelRuntime,request:typeof fetch=fetch):Promise<{id:string;name:string}[]> {
-  if(!runtime.isUsingSubscription('openai'))throw new Error('Требуется подписочный вход: npm run setup -- pi. API-key fallback отключен.');
+  if(!runtime.isUsingSubscription('openai'))throw new Error('Требуется подписочный вход: hse-harness model. API-key fallback отключен.');
   const resolution=await runtime.getAuth('openai');
   if(!resolution?.auth.apiKey)throw new Error('Подписочный токен недоступен; повторите setup pi');
   const response=await request('https://api.openai.com/v1/models',{headers:{Authorization:`Bearer ${resolution.auth.apiKey}`},signal:AbortSignal.timeout(20_000),redirect:'error'});
@@ -64,10 +64,10 @@ export class PiAssistant {
   manager!:SessionManager;
   async open(store:Store,modelId:string,tools:ToolDefinition[],profile?:StudyProfile):Promise<void> {
     const runtime=await modelRuntime();
-    if (!runtime.isUsingSubscription('openai')) throw new Error('Требуется подписочный вход: npm run setup -- pi. API-key fallback отключен.');
-    if(!modelId||modelId.startsWith('choose-'))throw new Error('Выберите модель из npm run setup -- models и запишите ее id в config.local.json');
+    if (!runtime.isUsingSubscription('openai')) throw new Error('Требуется подписочный вход: hse-harness model. API-key fallback отключен.');
+    if(!modelId||modelId.startsWith('choose-'))throw new Error('Выберите модель через hse-harness model');
     const model=runtime.getModel('openai',modelId);
-    if(!model) throw new Error('Модель отсутствует в каталоге: npm run setup -- models');
+    if(!model) throw new Error('Модель отсутствует в каталоге: повторите hse-harness model');
     const path=store.state.sessionPath;
     this.manager=path ? SessionManager.open(path,join(dataDir(),'sessions'),dataDir()) : SessionManager.create(dataDir(),join(dataDir(),'sessions'));
     if(this.manager.getEntries().length===0&&profile?.group===legacyProfile.group&&profile.program===legacyProfile.program&&profile.academicYear===legacyProfile.academicYear) await this.seed();

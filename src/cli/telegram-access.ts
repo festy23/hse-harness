@@ -10,7 +10,7 @@ export function showTelegramAccess(config: Pick<Config, 'ownerId' | 'chats'>, ui
     : 'Владелец ещё не настроен. Подключи Telegram через меню.', `${label} · Личный диалог`);
 
   if (!config.chats.length) {
-    ui.note('Учебные чаты пока не выбраны.\nДобавить источники: npm run harness -- telegram', `${label} · Разрешённые чаты`);
+    ui.note('Учебные чаты пока не выбраны.\nДобавить источники: hse-harness telegram (из исходников: npm run harness -- telegram)', `${label} · Разрешённые чаты`);
     return;
   }
   const entries = config.chats.map((chat, index) =>

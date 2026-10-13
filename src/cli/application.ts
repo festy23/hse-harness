@@ -11,19 +11,29 @@ import { showTelegramAccess } from './telegram-access.js';
 
 const help = `HSE HARNESS
 
-npm run harness                 интерактивное меню
-npm run harness -- configure    настройка всех разделов
-npm run harness -- profile      курс, группа, предметы
-npm run harness -- telegram     бот и учебные чаты
-npm run harness -- telegram-chats  разрешённые чаты и правила доступа
-npm run harness -- mail         Яндекс Почта и папки
-npm run harness -- model        подписка ChatGPT и модель
-npm run harness -- calendars    расписание и дедлайны
-npm run harness -- status       сохранённые настройки
-npm run harness -- start        сборка и запуск бота
+hse-harness                    интерактивное меню
+hse-harness setup              настройка всех разделов
+hse-harness profile            курс, группа, предметы
+hse-harness telegram           бот и учебные чаты
+hse-harness telegram-chats     разрешённые чаты и правила доступа
+hse-harness mail               Яндекс Почта и папки
+hse-harness model              подписка ChatGPT и модель
+hse-harness calendars          расписание и дедлайны
+hse-harness status             сохранённые настройки
+hse-harness start              запуск бота в текущем терминале
+hse-harness paths              расположение личных данных
+hse-harness import /путь        перенос старой установки в пустой каталог
+hse-harness service install    автозапуск на Linux через systemd
+hse-harness service status     состояние сервиса
+hse-harness service logs       логи сервиса
+hse-harness service stop       остановка сервиса
+hse-harness service restart    перезапуск сервиса
+hse-harness service uninstall  удалить сервис, сохранив личные данные
+hse-harness --version          версия приложения
 
 ↑ ↓ — выбрать · Enter — подтвердить · Ctrl+C — отменить
-Google / Яндекс / iCloud Calendar`;
+Google / Яндекс / iCloud Calendar
+Из исходников: npm run harness -- <команда>; настройка: npm run harness -- configure`;
 
 type View = Pick<typeof rendering, 'welcome' | 'showReport' | 'step' | 'success' | 'failure' | 'finish'>;
 export interface CLIDependencies {
@@ -42,7 +52,7 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
   const command = args[0];
   if (command === 'help' || command === '--help' || command === '-h') { print(help); return 0; }
   const valid = ['start', 'status', 'telegram-chats', 'configure', ...sections.map(section => section.id)];
-  if (args.length > 1 || (command && !valid.includes(command))) throw new SetupIssue('Неизвестная команда. Справка: npm run harness -- help');
+  if (args.length > 1 || (command && !valid.includes(command))) throw new SetupIssue('Неизвестная команда. Справка: hse-harness help');
   const state = overrides.state ?? new SetupState();
   await state.load();
   const ui = overrides.ui ?? rendering.terminal;
@@ -61,7 +71,7 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
   if (command === 'start') return await start() ?? 0;
   if (command === 'status') { view.showReport(await report()); ui.note('Показаны сохранённые данные. Реальные соединения проверяются командой /status в боте.'); return 0; }
   if (command === 'telegram-chats') { showTelegramAccess(state.config, ui); return 0; }
-  if (!(overrides.interactive ?? process.stdin.isTTY)) throw new SetupIssue('Открой интерактивный терминал и выполни npm run harness. Справка: npm run harness -- help');
+  if (!(overrides.interactive ?? process.stdin.isTTY)) throw new SetupIssue('Открой интерактивный терминал и выполни hse-harness (из исходников: npm run harness). Справка: hse-harness help');
 
   const flow = new Onboarding(state, ui, overrides.connections ?? connections);
   const runSection = async (id: SetupSection) => {
@@ -99,7 +109,7 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
     if (command) {
       const outcome = command === 'configure' ? await configure() : (await runSection(command as SetupSection), 'done');
       if (outcome === 'done') {
-        view.finish('Настройки сохранены. Запуск: npm run harness -- start');
+        view.finish('Настройки сохранены. Запуск: hse-harness start (из исходников: npm run harness -- start)');
         return 0;
       }
     }
@@ -107,7 +117,7 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
       current = await report();
       const action = await ui.choose('Главное меню', [
         { id: 'configure', label: `${icons.configure} Настроить всё по шагам`, hint: `${current.completed}/${current.total} разделов заполнено` },
-        { id: 'start', label: `${icons.start} ${current.pid ? 'Проверить работающего бота' : 'Запустить бота'}`, hint: 'автоматическая сборка' },
+        { id: 'start', label: `${icons.start} ${current.pid ? 'Проверить работающего бота' : 'Запустить бота'}`, hint: 'запуск учебного помощника' },
         ...sections.flatMap(section => [
           { id: section.id, label: section.title, hint: current.rows.find(row => row.id === section.id)!.ready ? `${icons.saved} сохранено` : `${icons.missing} нужно настроить` },
           ...(section.id === 'telegram' ? [{ id: 'telegram-chats', label: `${icons.status} Разрешённые Telegram-чаты`, hint: `${state.config.chats.length} источников` }] : []),

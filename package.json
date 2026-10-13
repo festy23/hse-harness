@@ -1,7 +1,42 @@
 {
-  "name": "hse-study-assistant",
+  "name": "@ivan-boss/hse-harness",
   "version": "0.1.0",
-  "private": true,
+  "description": "Personal study assistant with Telegram, Yandex Mail, calendars and Pi agent memory",
+  "license": "UNLICENSED",
+  "author": "ivan-boss",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/festy23/hse-harness.git"
+  },
+  "homepage": "https://github.com/festy23/hse-harness#readme",
+  "bugs": {
+    "url": "https://github.com/festy23/hse-harness/issues"
+  },
+  "keywords": [
+    "hse",
+    "study",
+    "assistant",
+    "telegram",
+    "pi",
+    "cli"
+  ],
+  "bin": {
+    "hse-harness": "bin/hse-harness.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "scripts/process.mjs",
+    "docs/",
+    "CONTEXT.md",
+    "deploy/",
+    "config.example.json",
+    ".env.example"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -10,6 +45,9 @@
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
     "build": "tsc -p tsconfig.json",
+    "prepack": "node scripts/prepare-bundle.mjs && npm run build && node scripts/verify-package.mjs",
+    "prepublishOnly": "npm run check && npm run test:e2e",
+    "test:package": "npm run build && node scripts/prepare-bundle.mjs && node --test test/package.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
     "check": "npm run typecheck && npm test",
@@ -36,5 +74,18 @@
     "@types/node": "26.6.4",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
-  }
+  },
+  "bundleDependencies": [
+    "@clack/prompts",
+    "@earendil-works/pi-coding-agent",
+    "big-integer",
+    "dotenv",
+    "html-to-text",
+    "ical.js",
+    "imapflow",
+    "node-ical",
+    "teleproto",
+    "tsdav",
+    "typebox"
+  ]
 }

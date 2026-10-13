@@ -1,0 +1,28 @@
+name: Check
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm install -g npm@12.2.0
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:e2e
+      - run: npm run test:package
+      - run: node scripts/verify-package.mjs
+      - run: mkdir -p "$RUNNER_TEMP/hse-release" && npm pack --pack-destination "$RUNNER_TEMP/hse-release" --json > "$RUNNER_TEMP/hse-release/manifest.json"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/hse-release/*.tgz
+          if-no-files-found: error

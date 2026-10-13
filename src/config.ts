@@ -35,7 +35,7 @@ export function calendarSettings(value:unknown):CalendarSettings {
 }
 export async function readConfigFile():Promise<Record<string,unknown>> {
   const path=process.env.STUDY_CONFIG ?? 'config.local.json';
-  const contents=await readFile(path,'utf8').catch(e=>{if((e as NodeJS.ErrnoException).code==='ENOENT')throw new Error('Создайте config.local.json из config.example.json; настройка описана в README');throw e;});
+  const contents=await readFile(path,'utf8').catch(e=>{if((e as NodeJS.ErrnoException).code==='ENOENT')throw new Error('Настрой агента: hse-harness setup (из исходников: npm run harness)');throw e;});
   return JSON.parse(contents);
 }
 export async function loadConfig(): Promise<Config> {

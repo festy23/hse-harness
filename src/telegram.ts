@@ -12,7 +12,7 @@ type Common = {pts:number;qts:number;date:number;seq:number};
 export class TelegramSource {
   private client!:TelegramClient;
   private peers=new Map<string,Api.TypeInputPeer>();
-  constructor(readonly config:Config,readonly store:Store,readonly onReply:(chat:string,id:string)=>Promise<void>,readonly alert:(text:string)=>Promise<void>) {}
+  constructor(readonly config:Config,readonly store:Store,readonly onReply:(chat:string,id:string)=>Promise<void>,readonly alert:(text:string)=>Promise<void>,readonly continuing:()=>boolean=()=>true) {}
   async connect():Promise<void> {
     const saved=await readFile(join(secretsDir(),'telegram.session'),'utf8');
     this.client=new TelegramClient(new StringSession(saved.trim()),Number(secret('TELEGRAM_API_ID')),secret('TELEGRAM_API_HASH'),{connectionRetries:3});
@@ -34,6 +34,7 @@ export class TelegramSource {
       await this.store.save();
     }
     for(const [id,peer] of this.peers) {
+      if(!this.continuing())return;
       const key=`tgChannel:${id}`;
       if (peer instanceof Api.InputPeerChannel && !this.store.state.cursors[key]) {
         const full=await this.client.invoke(new Api.channels.GetFullChannel({channel:new Api.InputChannel({channelId:peer.channelId,accessHash:peer.accessHash})}));
@@ -41,12 +42,12 @@ export class TelegramSource {
         this.store.state.cursors[key]=String(full.fullChat.pts);await this.store.save();
       }
       if (!this.store.state.cursors[`tgHistory:${id}`]) {
-        await this.reconcile(id);
+        if(!await this.reconcile(id))return;
         this.store.state.cursors[`tgHistory:${id}`]='1';await this.store.save();
       }
     }
     await this.commonDifference();
-    for(const [id,peer] of this.peers) if(peer instanceof Api.InputPeerChannel) await this.channelDifference(id,peer);
+    for(const [id,peer] of this.peers) {if(!this.continuing())return;if(peer instanceof Api.InputPeerChannel) await this.channelDifference(id,peer);}
   }
   private source(chat:string,m:Api.Message):Source {
     const reply=m.replyTo instanceof Api.MessageReplyHeader ? m.replyTo.replyToMsgId : undefined;
@@ -82,9 +83,10 @@ export class TelegramSource {
     }));
     await this.store.enqueue(sources);
   }
-  private async reconcile(chat:string):Promise<void> {
+  private async reconcile(chat:string):Promise<boolean> {
     const found=new Set<number>();let batch:Api.TypeMessage[]=[];
     for await(const m of this.client.iterMessages(this.peers.get(chat)!,{limit:undefined})) {
+      if(!this.continuing()){await this.messages(batch);return false;}
       if(m.date < +new Date(HISTORY_FROM)/1000) break;
       found.add(m.id);batch.push(m);
       if(batch.length>=20) {await this.messages(batch);batch=[];}
@@ -92,15 +94,17 @@ export class TelegramSource {
     await this.messages(batch);
     const old=Object.keys(this.store.state.seen).filter(k=>k.startsWith(`tg:${chat}:`)).map(k=>Number(k.split(':').at(-1)));
     await this.deleted(chat,old.filter(id=>!found.has(id)));
+    return true;
   }
   private async commonDifference():Promise<void> {
     for(let n=0;n<100;n++) {
+      if(!this.continuing())return;
       const s=JSON.parse(this.store.state.cursors.tgState!) as Common;
       const d=await this.client.invoke(new Api.updates.GetDifference({pts:s.pts,date:s.date,qts:s.qts}));
       if(d instanceof Api.updates.DifferenceTooLong) {
         await this.alert('Telegram: сервер не отдал весь пропущенный поток. Перепроверяю доступную историю; удаленные сведения могут быть недоступны.');
         const fresh=await this.client.invoke(new Api.updates.GetState());
-        for(const id of this.peers.keys()) await this.reconcile(id);
+        for(const id of this.peers.keys()) if(!await this.reconcile(id))return;
         this.store.state.cursors.tgState=JSON.stringify(fresh);await this.store.save();return;
       }
       if(d instanceof Api.updates.DifferenceEmpty) {
@@ -115,11 +119,12 @@ export class TelegramSource {
   }
   private async channelDifference(id:string,peer:Api.InputPeerChannel):Promise<void> {
     for(let n=0;n<100;n++) {
+      if(!this.continuing())return;
       const d=await this.client.invoke(new Api.updates.GetChannelDifference({channel:new Api.InputChannel({channelId:peer.channelId,accessHash:peer.accessHash}),filter:new Api.ChannelMessagesFilterEmpty(),pts:Number(this.store.state.cursors[`tgChannel:${id}`]),limit:100,force:true}));
       let pts:number;
       if(d instanceof Api.updates.ChannelDifferenceTooLong) {
         await this.alert(`Чат ${id}: часть обновлений недоступна. Перепроверяю текущую историю.`);
-        await this.reconcile(id);
+        if(!await this.reconcile(id))return;
         const dialog=d.dialog;
         if(!(dialog instanceof Api.Dialog) || !dialog.pts) throw new Error('Нет pts после ChannelDifferenceTooLong');
         pts=dialog.pts;

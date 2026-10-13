@@ -1,7 +1,18 @@
-import { mkdir, readFile, rename, writeFile, open, unlink } from 'node:fs/promises';
+import { mkdir, readFile, rename, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, type Job, type Source } from './domain.js';
+import { hash, validateTask, type Job, type Source, type Task } from './domain.js';
+
+export interface TaskOperation {
+  id:string;
+  taskId:string;
+  beforeTask?:Task;
+  desiredTask:Task;
+  phase:'pending'|'applied'|'notified'|'conflict'|'superseded';
+  notify:boolean;
+  created:number;
+  supersededBy?:string;
+}
 
 export interface Approval {
   id: string;
@@ -16,10 +27,16 @@ export interface Approval {
   notified?: boolean;
 }
 export interface State {
+  schemaVersion: 2;
   sessionPath?: string;
   botOffset: number;
+  botIdentity?: string;
   cursors: Record<string, string>;
-  queue: {id: string; sources: Source[]; ownerText?: string; digest?: string}[];
+  queue: {id: string; sources: Source[]; ownerText?: string; digest?: string; phase?: 'prompting' | 'answer'; answer?: string}[];
+  ownerUpdates: Record<string, true>;
+  outbox: Record<string, {text: string; buttons?: unknown; chunks: {state: 'pending' | 'sending' | 'sent'; messageId?: number}[]; created: number; ambiguous?: boolean}>;
+  missedDigests: Record<string, number>;
+  taskOperations?:Record<string,TaskOperation>;
   seen: Record<string, string>;
   jobs: Job[];
   delivered: Record<string, number>;
@@ -29,15 +46,37 @@ export interface State {
   bootstrapFinished: boolean;
   notices: Record<string,string>;
 }
-const empty = (): State => ({botOffset:0,cursors:{},queue:[],seen:{},jobs:[],delivered:{},approvals:[],calendarTokens:{},health:{},bootstrapFinished:false,notices:{}});
+const empty = (): State => ({schemaVersion:2,botOffset:0,cursors:{},queue:[],ownerUpdates:{},outbox:{},missedDigests:{},taskOperations:{},seen:{},jobs:[],delivered:{},approvals:[],calendarTokens:{},health:{},bootstrapFinished:false,notices:{}});
 
 export class Store {
   state: State = empty();
   private writes: Promise<void> = Promise.resolve();
+  private writeFailure?: unknown;
   constructor(readonly dir: string) {}
-  async load(): Promise<void> {
-    await mkdir(this.dir, {recursive:true, mode:0o700});
-    try { this.state = {...empty(), ...JSON.parse(await readFile(join(this.dir,'operations.json'),'utf8'))}; }
+  async load(options: {readOnly?: boolean} = {}): Promise<void> {
+    if (!options.readOnly) await mkdir(this.dir, {recursive:true, mode:0o700});
+    try {
+      const raw: unknown = JSON.parse(await readFile(join(this.dir,'operations.json'),'utf8'));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid operations state');
+      const s = raw as Partial<State>;
+      const version=(raw as {schemaVersion?:number}).schemaVersion;
+      if (version !== undefined && ![1,2].includes(version)) throw new Error('Unsupported operations format');
+      if (!Number.isSafeInteger(s.botOffset) || s.botOffset! < 0 || !Array.isArray(s.queue) || !Array.isArray(s.jobs) || !Array.isArray(s.approvals)) throw new Error('Invalid operations state');
+      if(s.botIdentity!==undefined&&(typeof s.botIdentity!=='string'||!/^telegram:(?:\d{1,20}|opaque:[0-9a-f]{24})$/.test(s.botIdentity)))throw new Error('Invalid bot identity');
+      for (const field of ['cursors','seen','delivered','calendarTokens','health','notices','ownerUpdates','outbox','missedDigests','taskOperations'] as const) {
+        if (s[field] !== undefined && (!s[field] || typeof s[field] !== 'object' || Array.isArray(s[field]))) throw new Error(`Invalid state field ${field}`);
+      }
+      if (s.queue.some(item => !item || typeof item.id !== 'string' || !Array.isArray(item.sources) || (item.phase!==undefined&&!['prompting','answer'].includes(item.phase)) || (item.answer!==undefined&&typeof item.answer!=='string'))) throw new Error('Invalid queue');
+      for(const delivery of Object.values(s.outbox??{})){
+        if(!delivery||typeof delivery.text!=='string'||!Array.isArray(delivery.chunks)||delivery.chunks.some(chunk=>!chunk||!['pending','sending','sent'].includes(chunk.state)))throw new Error('Invalid delivery receipt');
+      }
+      for(const [id,operation] of Object.entries(s.taskOperations??{})){
+        if(!operation||operation.id!==id||typeof operation.taskId!=='string'||!['pending','applied','notified','conflict','superseded'].includes(operation.phase)||typeof operation.notify!=='boolean'||!Number.isFinite(operation.created))throw new Error('Invalid calendar operation');
+        validateTask(operation.desiredTask);if(operation.beforeTask)validateTask(operation.beforeTask);
+        if(operation.desiredTask.id!==operation.taskId||operation.beforeTask&&operation.beforeTask.id!==operation.taskId)throw new Error('Invalid calendar operation task ID');
+      }
+      this.state = {...empty(), ...s, schemaVersion:2};
+    }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
   async save(): Promise<void> {
@@ -48,9 +87,15 @@ export class Store {
       const handle = await open(temp, 'wx', 0o600);
       try { await handle.writeFile(snapshot); await handle.sync(); } finally { await handle.close(); }
       await rename(temp,path);
+      const directory = await open(this.dir, 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
     };
-    this.writes = this.writes.then(write,write);
+    this.writes = this.writes.then(write,write).catch(error => { this.writeFailure ??= error; throw error; });
     return this.writes;
+  }
+  async flush(): Promise<void> {
+    await this.writes;
+    if (this.writeFailure) throw this.writeFailure;
   }
   async enqueue(sources: Source[]): Promise<void> {
     const accepted = sources.filter(s => this.state.seen[s.id] !== hash(JSON.stringify(s)));
@@ -65,28 +110,62 @@ export class Store {
     for(let i=0;i<pieces.length;i+=4)this.state.queue.push({id:randomUUID(),sources:pieces.slice(i,i+4)});
     await this.save();
   }
-  async enqueueOwner(ownerText: string): Promise<void> {
-    this.state.queue.push({id:randomUUID(),sources:[],ownerText});
+  /** Invoked after activation, never as part of readonly prepare. */
+  async activateBot(identity:string|undefined):Promise<void> {
+    if(!identity||this.state.botIdentity===identity)return;
+    if(this.state.botIdentity===undefined){
+      // Legacy receipts came from the same previously configured bot. Adopt
+      // its identity without losing the committed offset or queued operation IDs.
+      for(const key of Object.keys(this.state.ownerUpdates))if(/^\d+$/.test(key))this.state.ownerUpdates[`${identity}:${key}`]=true;
+    }else this.state.botOffset=0;
+    this.state.botIdentity=identity;await this.save();
+  }
+  async enqueueOwner(ownerText: string, updateId?: number, identity=this.state.botIdentity): Promise<void> {
+    const key = updateId === undefined ? undefined : identity?`${identity}:${updateId}`:String(updateId);
+    if (key && this.state.ownerUpdates[key]) return;
+    this.state.queue.push({id:key ? `owner:${key}` : randomUUID(),sources:[],ownerText});
+    if (key) { this.state.ownerUpdates[key] = true; this.state.botOffset = Math.max(this.state.botOffset, updateId! + 1); }
     await this.save();
   }
 }
 
 export async function writeSecret(path: string, content: string): Promise<void> {
   const temp = path + '.' + randomUUID();
-  await writeFile(temp,content,{mode:0o600});
+  const handle=await open(temp,'wx',0o600);
+  try{await handle.writeFile(content);await handle.sync();}finally{await handle.close();}
   await rename(temp,path);
 }
 
 export async function processLock(dir: string): Promise<() => Promise<void>> {
   await mkdir(dir,{recursive:true,mode:0o700});
   const path = join(dir,'service.lock');
-  try {
-    const old = Number(await readFile(path,'utf8'));
-    try { process.kill(old,0); throw new Error('Другой экземпляр сервиса уже работает'); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e; }
-    await unlink(path);
-  } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-  const handle = await open(path,'wx',0o600);
-  await handle.writeFile(String(process.pid)); await handle.close();
-  return async () => { await unlink(path); };
+  const identity = JSON.stringify({pid:process.pid,nonce:randomUUID(),workerId:process.env.HSE_WORKER_ID,startedAt:new Date().toISOString()});
+  for(let attempt=0;attempt<2;attempt++) {
+    let handle;
+    try {
+      handle=await open(path,'wx',0o600);await handle.writeFile(identity);await handle.sync();await handle.close();handle=undefined;
+      return async()=>{try{if(await readFile(path,'utf8')===identity)await unlink(path);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}};
+    }catch(error){
+      await handle?.close();if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;
+    }
+    // Serialize only dead-owner reclamation; ordinary uncontended startup has
+    // no recovery guard to strand. An interrupted recovery remains blocked.
+    const recoveryPath=path+'.recovery';let guard;
+    try{guard=await open(recoveryPath,'wx',0o600);}
+    catch(error){if((error as NodeJS.ErrnoException).code==='EEXIST')throw new Error('Writer lock recovery interrupted or in progress; inspect service.lock.recovery');throw error;}
+    try{
+      const previous=await readFile(path,'utf8');let pid:number;
+      try{const value:unknown=JSON.parse(previous);pid=typeof value==='number'?value:Number((value as {pid?:number})?.pid);}
+      catch{throw new Error('Неизвестный lock; требуется проверка владельцем');}
+      if(!Number.isSafeInteger(pid)||pid<=0)throw new Error('Неизвестный lock; требуется проверка владельцем');
+      try{process.kill(pid,0);throw new Error('Другой экземпляр сервиса уже работает');}
+      catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error;}
+      if(await readFile(path,'utf8')!==previous)throw new Error('Lock изменился при проверке');
+      const stale=path+'.stale-'+randomUUID();await rename(path,stale);
+      // Never unlink the original path after recovery: another contender may
+      // have acquired it since rename. Only the detached old record is ours.
+      await unlink(stale);
+    }finally{await guard.close();await unlink(recoveryPath);}
+  }
+  throw new Error('Не удалось получить writer lock');
 }

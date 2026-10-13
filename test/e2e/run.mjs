@@ -10,8 +10,9 @@ import { CalDAVFixture } from './caldav-fixture.mjs';
 // Fixtures replace external transports and model decisions, never study rules or application loops.
 const provider=process.argv.find(a=>a.startsWith('--calendar='))?.split('=')[1]??'icloud';
 const startupPending=process.argv.includes('--startup-pending');
+const managed=process.argv.includes('--managed');
 assert.ok(['icloud','google','yandex'].includes(provider));
-const root=resolve('data/e2e/latest',provider+(startupPending?'-startup':''));await rm(root,{recursive:true,force:true});
+const root=resolve('data/e2e/latest',provider+(startupPending?'-startup':'')+(managed?'-managed':''));await rm(root,{recursive:true,force:true});
 await mkdir(join(root,'secrets'),{recursive:true});
 const report=[];let complete=false;
 const original='2026-10-08T09:00:00.000Z';
@@ -20,7 +21,8 @@ const cloud=new CalDAVFixture(state);let googleRequests=0;
 state.calendarDown=startupPending;state.subscriptionReady=!startupPending;
 const tasks=new Map();
 const groupAttempts=[];
-const successfulTurns=[];
+const successfulTurns=[];let releaseModel;
+const protocolEvents=[];
 const base=(id,title,deadlines)=>({id,title,course:'Тестирование',status:'open',deadlines,basis:'explicit',sources:[`tg:-100123:${id}`],notes:'',disputed:false});
 const a=base('hw_a','ДЗ A',[original]);
 const b={...base('hw_b','ДЗ B',['2026-10-10']),basis:'personal-date-rule',sources:['mail:fixture-1']};
@@ -33,6 +35,7 @@ function model(messages){
   if(state.modelDown)return {content:[],error:'E2E simulated model unavailable'};
   const text=contentText(messages.findLast(m=>m.role==='user')??{});let plan=[];
   successfulTurns.push(text);
+  if(text.includes('Контроль managed обновления'))return {content:[{type:'text',text:'Managed turn complete.'}]};
   if(text.includes('Контроль приоритета диалога.'))return {content:[{type:'text',text:'Приоритетный личный ответ.'}]};
   if(messages.at(-1)?.role==='toolResult'){
     if(text.includes('Перенеси семинар')&&messages.at(-1).toolName==='get_schedule'){
@@ -84,7 +87,7 @@ const server=createServer(async(req,res)=>{
       if(state.groupAmbiguous){state.groupAmbiguous=false;return send({error:'Accepted then response lost'},503);}return send(message);
     }
     if(url.pathname==='/mail/list')return send(state.mail);
-    if(url.pathname==='/model')return send(model(body.messages));
+    if(url.pathname==='/model'){if(state.holdNextModel){state.holdNextModel=false;state.modelHeld=true;await new Promise(r=>{releaseModel=r;});state.modelHeld=false;}return send(model(body.messages));}
     if(url.pathname.startsWith('/google/')){
       googleRequests++;
       const [, , ,calendar, ,id]=url.pathname.split('/');
@@ -107,12 +110,40 @@ const davHost=provider==='yandex'?'caldav.yandex.ru':'caldav.icloud.com';
 await writeFile(join(root,'config.json'),JSON.stringify({ownerId:123,chats:[{id:'-100123',title:'Тестовая учебная группа'}],features:{googleCalendar:provider==='google',icloudCalendar:provider==='icloud',yandexCalendar:provider==='yandex'},calendars:{timetable:{provider,id:provider==='google'?'schedule':`https://${davHost}/calendars/user/schedule/`},agent:{provider,id:provider==='google'?'agent':`https://${davHost}/calendars/user/agent/`}},folders:['INBOX'],model:startupPending?'':'e2e-scripted',pollSeconds:15}));
 await writeFile(join(root,'secrets/telegram.session'),'');
 await writeFile(join(root,'secrets/google.json'),JSON.stringify({access_token:'fixture',refresh_token:'fixture',expires_at:Date.parse('2030-01-01')}));
-let child,logs='',exited;
-function start(){
-  exited=false;child=spawn(process.execPath,['--import',process.env.STUDY_E2E_PRELOAD??resolve('test/e2e/preload.mjs'),process.env.STUDY_E2E_ENTRY??resolve('dist/main.js')],{env:{...process.env,STUDY_CONFIG:join(root,'config.json'),STUDY_DATA_DIR:join(root,'runtime'),STUDY_SECRETS_DIR:join(root,'secrets'),STUDY_E2E_ENDPOINT:endpoint,TELEGRAM_BOT_TOKEN:'fixture',TELEGRAM_API_ID:'1',TELEGRAM_API_HASH:'fixture',YANDEX_ADDRESS:'fixture@example.test',YANDEX_APP_PASSWORD:'fixture',ICLOUD_USERNAME:'fixture@example.test',ICLOUD_APP_PASSWORD:'fixture',YANDEX_CALENDAR_USERNAME:'fixture@example.test',YANDEX_CALENDAR_APP_PASSWORD:'fixture'},stdio:['ignore','pipe','pipe']});
-  child.stdout.on('data',c=>{logs+=c;});child.stderr.on('data',c=>{logs+=c;});child.on('exit',()=>{exited=true;});
+let child,logs='',exited,incarnation=0,sequence=0,workerId;
+async function request(type,extra={},timeout=5000){
+  const current=child;const seq=++sequence;const expected={prepare:'boot-ready',activate:'active',drain:'quiescent',resume:'active',finish:'exiting',notice:'notice-sent'}[type];
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{cleanup();reject(Error('IPC timeout '+type+'\n'+logs));},timeout);
+    const onExit=()=>{cleanup();reject(Error('Worker exited during '+type+'\n'+logs));};
+    const onMessage=m=>{if(m.workerId!==workerId||m.sequence!==seq)return;if(['boot-failed','fatal'].includes(m.type)){cleanup();reject(Error('Worker IPC failure '+JSON.stringify(m)));}else if(m.type===expected){cleanup();resolve(m);}};
+    const cleanup=()=>{clearTimeout(timer);current.off('message',onMessage);current.off('exit',onExit);};
+    current.on('message',onMessage);current.on('exit',onExit);
+    current.send({protocolVersion:1,attemptId:'fixture-update',workerId,sequence:seq,type,...extra});
+  });
 }
-async function stop(){if(!child||exited)return;const done=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');const result=await Promise.race([done.then(()=>true),pause(3000).then(()=>false)]);if(!result){child.kill('SIGKILL');await done;throw new Error('Daemon did not stop gracefully');}}
+async function start(){
+  exited=false;incarnation++;sequence=0;workerId=`fixture-worker-${incarnation}`;
+  child=spawn(process.execPath,['--import',process.env.STUDY_E2E_PRELOAD??resolve('test/e2e/preload.mjs'),process.env.STUDY_E2E_ENTRY??resolve('dist/main.js')],{env:{...process.env,STUDY_CONFIG:join(root,'config.json'),STUDY_DATA_DIR:join(root,'runtime'),STUDY_SECRETS_DIR:join(root,'secrets'),STUDY_E2E_ENDPOINT:endpoint,TELEGRAM_BOT_TOKEN:'fixture',TELEGRAM_API_ID:'1',TELEGRAM_API_HASH:'fixture',YANDEX_ADDRESS:'fixture@example.test',YANDEX_APP_PASSWORD:'fixture',ICLOUD_USERNAME:'fixture@example.test',ICLOUD_APP_PASSWORD:'fixture',YANDEX_CALENDAR_USERNAME:'fixture@example.test',YANDEX_CALENDAR_APP_PASSWORD:'fixture',...(managed?{HSE_WORKER_ID:workerId,HSE_RELEASE_VERSION:`0.2.${incarnation}`}:{})},stdio:managed?['ignore','pipe','pipe','ipc']:['ignore','pipe','pipe']});
+  child.stdout.on('data',c=>{logs+=c;});child.stderr.on('data',c=>{logs+=c;});child.on('exit',()=>{exited=true;});
+  if(managed){
+    child.on('message',m=>protocolEvents.push(m));
+    const before=await readFile(join(root,'runtime/operations.json'),'utf8').catch(e=>{if(e.code!=='ENOENT')throw e;return null;});
+    await request('prepare');
+    const after=await readFile(join(root,'runtime/operations.json'),'utf8').catch(e=>{if(e.code!=='ENOENT')throw e;return null;});
+    assert.equal(after,before,'prepare cannot mutate operational state');
+    await request('activate');
+  }
+}
+async function finishDrained(){
+  const done=new Promise(r=>child.once('exit',r));await request('finish');
+  const result=await Promise.race([done.then(()=>true),pause(3000).then(()=>false)]);if(!result){child.kill('SIGKILL');await done;throw Error('Managed worker did not finish');}
+}
+async function stop(){
+  if(!child||exited)return;
+  if(managed){await request('drain');const saved=await readFile(join(root,'runtime/operations.json'),'utf8');await pause(100);assert.equal(await readFile(join(root,'runtime/operations.json'),'utf8'),saved,'quiescent cannot write');await finishDrained();return;}
+  const done=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');const result=await Promise.race([done.then(()=>true),pause(3000).then(()=>false)]);if(!result){child.kill('SIGKILL');await done;throw new Error('Daemon did not stop gracefully');}
+}
 async function crash(){const done=new Promise(r=>child.once('exit',r));child.kill('SIGKILL');await done;}
 async function until(fn,label,timeout=8000){const end=Date.now()+timeout;while(Date.now()<end){if(exited)throw new Error('Daemon exited:\n'+logs);if(await fn())return;await pause(25);}throw new Error('Timed out: '+label+'\n'+logs);}
 function bot(text){state.updates.push({update_id:state.nextUpdate++,message:{message_id:state.nextUpdate,chat:{id:123,type:'private'},from:{id:123},text}});}
@@ -122,7 +153,7 @@ const taskEvents=()=>[...state.calendar.values()].map(e=>({event:e,task:e.task??
 const event=id=>taskEvents().find(x=>x.task.id===id);
 async function phase(label,fn){await fn();report.push(label);console.log(`PASS [${provider}] `+label);}
 try{
-  start();
+  await start();
   if(startupPending){
     await phase('Личный бот отвечает при недоступном календаре/отсутствии входа Pi, сохраняет сообщение и восстанавливается после настройки без рестарта',async()=>{
       bot('/start');await until(()=>texts().some(t=>t.startsWith('Это основной личный диалог')),'/start while calendar offline');
@@ -148,6 +179,21 @@ try{
     assert.equal(state.calendar.size,2);assert.equal(event('hw_b').event.start.dateTime,'2026-10-09T21:00:00.000Z');
     assert.equal(texts().filter(t=>t.startsWith('До сдачи')).length,0);
     bot('/ready');await until(()=>texts().includes('Напоминания включены. Сообщай «сделал <задание>» и «сдал <задание>».'),'ready');
+  });
+  if(managed)await phase('Managed update during real Pi prompt: drain waits for terminal JSONL/answer; new incarnation resumes the same memory',async()=>{
+    state.holdNextModel=true;bot('Контроль managed обновления.');await until(()=>state.modelHeld,'held real Pi prompt');
+    const oldEvents=protocolEvents.length;const draining=request('drain');
+    await until(()=>protocolEvents.slice(oldEvents).some(m=>m.type==='draining'),'draining acknowledged');await pause(150);
+    assert.equal(protocolEvents.slice(oldEvents).some(m=>m.type==='quiescent'),false,'accepted prompt must not abort on drain');
+    releaseModel();await draining;
+    assert.equal(texts().filter(t=>t==='Managed turn complete.').length,1);
+    const before=JSON.parse(await readFile(join(root,'runtime/operations.json'),'utf8'));
+    const jsonl=await readFile(before.sessionPath,'utf8');assert.match(jsonl,/hse-operation-result/);assert.doesNotMatch(jsonl,/"stopReason":"aborted"/);
+    await finishDrained();await start();await until(()=>texts().filter(t=>t.startsWith('Учебный помощник запущен')).length===2,'new managed incarnation');
+    const after=JSON.parse(await readFile(join(root,'runtime/operations.json'),'utf8'));assert.equal(after.sessionPath,before.sessionPath);assert.equal(texts().filter(t=>t==='Managed turn complete.').length,1);
+    const epoch=protocolEvents.length;const d=request('drain');await d;await request('resume');
+    assert.equal(protocolEvents.slice(epoch).at(-1).type,'active');
+    bot('После resume ответь пожалуйста.');await until(()=>texts().some(t=>t==='Ответ тестовой модели.'),'worker responds after resumed drain');
   });
   await phase('Напоминание за три дня приходит один раз; «сделал» сохраняет напоминания о сдаче',async()=>{
     state.now=Date.parse('2026-10-05T09:00:00Z');
@@ -211,7 +257,7 @@ try{
   });
   await phase('Перезапуск процесса сохраняет контекст штатной Pi-сессии и не повторяет напоминания/одобренные вопросы',async()=>{
     const priorReminders=texts().filter(t=>t.startsWith('До сдачи')).length;
-    await stop();start();await until(()=>texts().filter(t=>t.startsWith('Учебный помощник запущен')).length===2,'daemon restarted');
+    await stop();await start();await until(()=>texts().filter(t=>t.startsWith('Учебный помощник запущен')).length===(managed?3:2),'daemon restarted');
     bot('Что помнишь про ДЗ A?');await until(()=>texts().some(t=>t.includes('Из истории Pi: ДЗ A submitted, 2026-10-09T09:00:00.000Z')),'Pi native history restored');
     await pause(400);assert.equal(state.group.length,2);assert.equal(texts().filter(t=>t.startsWith('До сдачи')).length,priorReminders);
   });
@@ -237,7 +283,7 @@ try{
     state.now=Date.parse('2026-10-12T09:00:00Z');
     await until(()=>texts().some(t=>t.startsWith('До сдачи осталось три дня:')&&t.includes('ДЗ C')),'reminder without model');
     const prior=texts().filter(t=>t.startsWith('До сдачи')&&t.includes('ДЗ C')).length;
-    await stop();const turnStart=successfulTurns.length;state.modelDown=false;start();await until(()=>event('hw_d'),'recovered queued D');
+    await stop();const turnStart=successfulTurns.length;state.modelDown=false;await start();await until(()=>event('hw_d'),'recovered queued D');
     await until(()=>texts().includes('Приоритетный личный ответ.'),'owner answered through backlog');
     const recovered=successfulTurns.slice(turnStart);
     const ownerIndex=recovered.findIndex(t=>t.includes('Контроль приоритета диалога.')),sourceIndex=recovered.findIndex(t=>t.includes('ДЗ D до 16 октября'));
@@ -250,9 +296,9 @@ try{
     await until(()=>event('hw_c')?.task.deadline==='2026-10-17T09:00:00.000Z','first undelivered move');
     source('ДЗ C окончательно перенесли на 18 октября.',[{name:'update_task',args:{...c,deadlines:['2026-10-18T12:00:00+03:00']}}]);
     await until(()=>event('hw_c')?.task.deadline==='2026-10-18T09:00:00.000Z','latest undelivered move');await pause(150);
-    await crash();const prior=state.notifications.length;state.botDown=false;start();
-    await until(()=>texts().slice(prior).some(t=>t.startsWith('Изменение/близкий срок:')&&t.includes('ДЗ C')),'recovered urgent notice');
-    const notices=texts().slice(prior).filter(t=>t.startsWith('Изменение/близкий срок:')&&t.includes('ДЗ C'));
+    await crash();const prior=state.notifications.length;state.botDown=false;await start();
+    await until(()=>texts().slice(prior).some(t=>t.includes('Изменение/близкий срок:')&&t.includes('ДЗ C')),'recovered urgent notice');
+    const notices=texts().slice(prior).filter(t=>t.includes('Изменение/близкий срок:')&&t.includes('ДЗ C'));
     assert.equal(notices.length,1);assert.match(notices[0],/18 окт/);assert.doesNotMatch(notices[0],/17 окт/);
   });
   await phase('Сводки в 10:00 и 20:00 Москвы отправляются по одной; выполненная работа напоминает о сдаче за сутки и час',async()=>{
@@ -274,7 +320,7 @@ try{
   let cleanupError;await stop().catch(error=>{logs+='\n'+error;cleanupError=error;});
   server.closeAllConnections();await new Promise(r=>server.close(r));
   await writeFile(join(root,'daemon.log'),logs);
-  await writeFile(join(root,'result.json'),JSON.stringify({success:complete&&!cleanupError,calendarProvider:provider,googleRequests,externalServices:'loopback fixtures',model:'scripted tool decisions, no real LLM',passed:report,notifications:state.notifications,group:state.group,groupAttempts},null,2));
+  await writeFile(join(root,'result.json'),JSON.stringify({success:complete&&!cleanupError,calendarProvider:provider,googleRequests,externalServices:'loopback fixtures',model:'scripted tool decisions, no real LLM',passed:report,managed,protocolEvents,notifications:state.notifications,group:state.group,groupAttempts},null,2));
   console.log(`Local artifacts: ${root}`);
   if(cleanupError)throw cleanupError;
 }

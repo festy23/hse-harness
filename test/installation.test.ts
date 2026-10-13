@@ -67,15 +67,16 @@ test('import refuses a live source, nested destination, existing owner, and syml
   });
 });
 
-test('systemd unit uses the installed binary and explicit persistent paths with no credential values', () => {
+test('systemd unit uses the stable launcher and explicit persistent paths with no credential values', () => {
   const home = '/home/study/a space%$';
-  const unit = serviceUnit({ node: '/usr/bin/node', executable: '/opt/a space%$/bin/hse-harness.mjs', home, uid: 1000, gid: 1000,
+  const unit = serviceUnit({ node: '/usr/bin/node', executable: home + '/runtime/launcher.mjs', home, uid: 1000, gid: 1000,
     paths: { DOTENV_CONFIG_PATH: home + '/.env', STUDY_DATA_DIR: home + '/data', STUDY_CONFIG: home + '/config.local.json', STUDY_SECRETS_DIR: home + '/secrets' } });
   assert.match(unit, /User=1000\nGroup=1000/);
   assert.ok(unit.includes('WorkingDirectory=/home/study/a space%%$\n'));
-  assert.ok(unit.includes('ExecStart="/usr/bin/node" "/opt/a space%%$$/bin/hse-harness.mjs" run'));
+  assert.ok(unit.includes('ExecStart="/usr/bin/node" "/home/study/a space%%$$/runtime/launcher.mjs"\n'));
   assert.ok(unit.includes('Environment="HSE_HARNESS_HOME=/home/study/a space%%$"'));
   assert.match(unit, /Restart=on-failure/);
+  assert.match(unit, /KillMode=control-group/);
   assert.doesNotMatch(unit, /TOKEN|PASSWORD|npm run build/);
   assert.throws(() => serviceUnit({ node: 'node', executable: 'cli', home, uid: 0, gid: 0, paths: {} }), /непривилегированного/);
   assert.throws(() => serviceUnit({ node: 'node', executable: 'cli', home: '/path\ninjected', uid: 1000, gid: 1000, paths: {} }), /неподдерживаемый/);

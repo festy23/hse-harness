@@ -7,7 +7,42 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: '22.19.0'
+            npm: '11.17.0'
+          - node: '24'
+            npm: '12.2.0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm install -g npm@${{ matrix.npm }}
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:e2e
+      - run: npm run test:e2e:managed
+      - run: npm run test:updates
+      - run: node --test test/systemd-updates.test.mjs
+        env:
+          HSE_REQUIRE_SYSTEMD: '1'
+      - run: npm run test:package
+      - run: node scripts/verify-package.mjs
+      - run: mkdir -p "$RUNNER_TEMP/hse-release" && npm pack --pack-destination "$RUNNER_TEMP/hse-release" --json > "$RUNNER_TEMP/hse-release/manifest.json"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: npm-package-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/hse-release/*.tgz
+          if-no-files-found: error
+  macos:
+    needs: linux
+    runs-on: macos-14
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
@@ -17,12 +52,13 @@ jobs:
       - run: npm install -g npm@12.2.0
       - run: npm ci
       - run: npm run check
-      - run: npm run test:e2e
+      - run: npm run test:e2e:managed
+      - run: npm run test:updates
       - run: npm run test:package
-      - run: node scripts/verify-package.mjs
-      - run: mkdir -p "$RUNNER_TEMP/hse-release" && npm pack --pack-destination "$RUNNER_TEMP/hse-release" --json > "$RUNNER_TEMP/hse-release/manifest.json"
-      - uses: actions/upload-artifact@v7.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
-          name: npm-package
-          path: ${{ runner.temp }}/hse-release/*.tgz
-          if-no-files-found: error
+          name: npm-package-node-24
+          path: ${{ runner.temp }}/hse-linux-release
+      - name: Install the Linux release on macOS
+        run: |
+          HSE_PACKAGE_ARCHIVE="$(find "$RUNNER_TEMP/hse-linux-release" -name '*.tgz' -print -quit)" npm run test:package

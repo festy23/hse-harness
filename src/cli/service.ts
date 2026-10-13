@@ -5,6 +5,7 @@ import { dataDir } from '../config.js';
 import { SetupIssue } from './errors.js';
 import type { SetupConfig } from './state.js';
 import { runProcess as executeProcess } from '../../scripts/process.mjs';
+import { managedInstallation, managedHome, runtimeAPI } from './updates.js';
 
 export type ProcessRunner = (command: string, args: string[], root: string) => Promise<number>;
 export async function runningPid(dir = dataDir()): Promise<number | undefined> {
@@ -14,7 +15,9 @@ export async function runningPid(dir = dataDir()): Promise<number | undefined> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw new SetupIssue('Не удалось проверить состояние процесса бота');
   }
-  const pid = Number(value);
+  let pid: number;
+  try { const lock = JSON.parse(value); pid = typeof lock === 'number' ? lock : Number(lock?.pid); }
+  catch { pid = Number(value); }
   if (!Number.isSafeInteger(pid) || pid <= 0) return;
   try { process.kill(pid, 0); return pid; }
   catch (error) {
@@ -43,6 +46,17 @@ export class ServiceControl {
       notify('Собираю проект…');
       const built = await this.runner(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], this.root);
       if (built !== 0) throw new SetupIssue('Сборка завершилась с ошибкой. Бот не запущен');
+    }
+    const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
+    if (compiled && managedInstallation(packageRoot)) {
+      if (process.platform === 'win32') throw new SetupIssue('Автоматическое применение обновлений поддерживается на macOS/Linux. Прямой запуск: hse-harness run');
+      notify('Подготавливаю проверенную копию установленной версии. Данные и авторизация остаются в личном каталоге.');
+      const runtime = await runtimeAPI();
+      const home = managedHome();
+      const installed = await runtime.installRuntime({ home, packageRoot, node: process.execPath });
+      notify('Бот запускается с автоматическим применением npm-обновлений. Остановка — Ctrl+C.');
+      const code = await this.runner(process.execPath, [installed.launcher], home);
+      return { kind: 'stopped', code };
     }
     notify('Бот запускается. Остановка — Ctrl+C. Личный диалог — через /start в Telegram.');
     const entry = compiled ? fileURLToPath(new URL('../../dist/main.js', import.meta.url)) : join(this.root, 'dist/main.js');

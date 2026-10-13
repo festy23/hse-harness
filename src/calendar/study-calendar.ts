@@ -1,4 +1,4 @@
-import { deadline,hash,HISTORY_FROM,validateTask,type Calendar,type Lesson,type Task } from '../domain.js';
+import { deadline,hash,HISTORY_FROM,validateTask,moscowDate,type Calendar,type Lesson,type Task } from '../domain.js';
 import type { Store } from '../store.js';
 import type { CalendarCollection,CalendarEvent } from './collection.js';
 
@@ -34,6 +34,12 @@ export class StudyCalendar implements Calendar {
     const event=await this.timetable.get(id);
     if(event.status==='cancelled')throw new Error('Занятие уже отменено');
     return `${event.title}\nСейчас: ${event.start??'Неизвестно'} → ${event.end??'Неизвестно'}`;
+  }
+  async lessonMatches(id:string,start:string,end:string):Promise<boolean> {
+    const event=await this.timetable.get(id);
+    if(event.status==='cancelled'||!event.start||!event.end)return false;
+    if(event.allDay)return event.start===moscowDate(+new Date(deadline(start).value))&&event.end===moscowDate(+new Date(deadline(end).value));
+    return deadline(event.start).value===deadline(start).value&&deadline(event.end).value===deadline(end).value;
   }
   async syncSchedule(store:Store):Promise<void> {
     const key=this.timetable.identity,snapshotKey=`calendarSnapshot:${key}`;

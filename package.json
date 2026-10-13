@@ -1,6 +1,6 @@
 {
   "name": "@ivan-boss/hse-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Personal study assistant with Telegram, Yandex Mail, calendars and Pi agent memory",
   "license": "UNLICENSED",
   "author": "ivan-boss",
@@ -31,7 +31,9 @@
     "CONTEXT.md",
     "deploy/",
     "config.example.json",
-    ".env.example"
+    ".env.example",
+    "runtime/",
+    "runtime-manifest.json"
   ],
   "publishConfig": {
     "access": "public",
@@ -45,16 +47,19 @@
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
     "build": "tsc -p tsconfig.json",
-    "prepack": "node scripts/prepare-bundle.mjs && npm run build && node scripts/verify-package.mjs",
+    "prepack": "node scripts/prepare-bundle.mjs && npm run build && node scripts/create-runtime-manifest.mjs && node scripts/verify-package.mjs",
     "prepublishOnly": "npm run check && npm run test:e2e",
-    "test:package": "npm run build && node scripts/prepare-bundle.mjs && node --test test/package.test.mjs",
+    "test:package": "npm run build && node scripts/prepare-bundle.mjs && node scripts/create-runtime-manifest.mjs && node --test test/package.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test && npm run test:runtime",
     "test:e2e": "npm run build && node test/e2e/run.mjs --calendar=icloud && node test/e2e/run.mjs --calendar=google && node test/e2e/run.mjs --calendar=yandex && node test/e2e/run.mjs --calendar=icloud --startup-pending",
     "setup": "tsx src/setup.ts",
     "harness": "node scripts/harness.mjs",
-    "eval": "tsx src/evaluate.ts"
+    "eval": "tsx src/evaluate.ts",
+    "test:runtime": "node --test test/release-store.test.mjs test/update-supervisor.test.mjs test/runtime-installation.test.mjs",
+    "test:e2e:managed": "npm run build && node test/e2e/run.mjs --calendar=icloud --managed",
+    "test:updates": "npm run build && node scripts/prepare-bundle.mjs && node scripts/create-runtime-manifest.mjs && node --test test/npm-update.integration.test.mjs"
   },
   "dependencies": {
     "@clack/prompts": "1.8.1",

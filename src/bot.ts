@@ -1,4 +1,6 @@
 import { secret } from './config.js';
+import { randomUUID, createHash } from 'node:crypto';
+import type { Store } from './store.js';
 
 export interface BotUpdate {
   update_id: number;
@@ -6,26 +8,60 @@ export interface BotUpdate {
   callback_query?: {id:string;from:{id:number};message?:{chat:{id:number;type:string}};data?:string};
 }
 export type Buttons = {text:string;callback_data:string}[][];
-export interface Notifier { send(text:string, buttons?:Buttons): Promise<void> }
+export class BotApiRejection extends Error { readonly source='provider' as const; }
+/** Public Bot API ID survives token rotation; opaque fixture tokens never leak. */
+export function botIdentity(token:string):string {
+  const numeric=/^(\d{1,20}):/.exec(token)?.[1];
+  return numeric?`telegram:${BigInt(numeric).toString()}`:`telegram:opaque:${createHash('sha256').update(token).digest('hex').slice(0,24)}`;
+}
+export interface Notifier { send(text:string, buttons?:Buttons, deliveryId?:string): Promise<void> }
 export class TelegramBot implements Notifier {
-  constructor(readonly owner: number) {}
-  async call<T>(method:string, args:unknown): Promise<T> {
+  private readonly sends = new Map<string, Promise<void>>();
+  constructor(readonly owner: number, readonly store?:Store) {}
+  get identity():string|undefined { const token=process.env.TELEGRAM_BOT_TOKEN;return token?botIdentity(token):undefined; }
+  async call<T>(method:string, args:unknown, signal?:AbortSignal): Promise<T> {
     const response = await fetch(`https://api.telegram.org/bot${secret('TELEGRAM_BOT_TOKEN')}/${method}`, {
-      method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(40_000),
+      method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(args),signal:signal ? AbortSignal.any([signal,AbortSignal.timeout(40_000)]) : AbortSignal.timeout(40_000),
     });
     const data = await response.json() as {ok:boolean;result:T;description?:string};
-    if (!data.ok) throw new Error(`Telegram Bot API: ${data.description ?? response.status}`);
+    if (!data.ok) throw new BotApiRejection(`Telegram Bot API: ${data.description ?? response.status}`);
     return data.result;
   }
-  async send(text:string, buttons?:Buttons): Promise<void> {
-    // Никакого Markdown parse_mode: текст модели/источника не исполняется как разметка.
-    const pieces = Array.from(text.matchAll(/[\s\S]{1,3500}/gu), x=>x[0]);
-    for (let i=0;i<pieces.length;i++) await this.call('sendMessage', {
-      chat_id:this.owner,text:pieces[i],link_preview_options:{is_disabled:true},
-      ...(i === pieces.length-1 && buttons ? {reply_markup:{inline_keyboard:buttons}} : {}),
-    });
+  async send(text:string, buttons?:Buttons, deliveryId:string=randomUUID()): Promise<void> {
+    const existing=this.sends.get(deliveryId);if(existing)return existing;
+    const result=this.sendChunks(text,buttons,deliveryId);
+    this.sends.set(deliveryId,result);
+    try{await result;}finally{this.sends.delete(deliveryId);}
   }
-  updates(offset:number): Promise<BotUpdate[]> { return this.call('getUpdates',{offset,timeout:25,allowed_updates:['message','callback_query']}); }
+  private async sendChunks(text:string,buttons:Buttons|undefined,id:string):Promise<void> {
+    // Никакого Markdown parse_mode: текст модели/источника не исполняется как разметка.
+    let delivery=this.store?.state.outbox[id];
+    // Payload is frozen before its first external effect, including retries.
+    if(delivery){text=delivery.text;buttons=delivery.buttons as Buttons|undefined;}
+    const pieces = Array.from(text.matchAll(/[\s\S]{1,3500}/gu), x=>x[0]);
+    if (this.store && !delivery) {
+      delivery={text,buttons,chunks:pieces.map(()=>({state:'pending' as const})),created:Date.now()};
+      this.store.state.outbox[id]=delivery;await this.store.save();
+    }
+    for (let i=0;i<pieces.length;i++) {
+      const receipt=delivery?.chunks[i];
+      if(receipt?.state==='sent')continue;
+      const uncertain=receipt?.state==='sending';
+      if(receipt){if(uncertain)delivery!.ambiguous=true;receipt.state='sending';await this.store!.save();}
+      let result:{message_id?:number};
+      try{result=await this.call<{message_id?:number}>('sendMessage', {
+      chat_id:this.owner,text:(uncertain?'Повтор после сбоя: предыдущая доставка могла состояться.\n':'')+pieces[i],link_preview_options:{is_disabled:true},
+      ...(i === pieces.length-1 && buttons ? {reply_markup:{inline_keyboard:buttons}} : {}),
+      });}catch(error){
+        // A parsed API rejection proves no accepted send. A lost response does
+        // not, so its sending receipt is deliberately left ambiguous.
+        if(receipt&&error instanceof BotApiRejection){receipt.state='pending';await this.store!.save();}
+        throw error;
+      }
+      if(receipt){receipt.state='sent';receipt.messageId=result?.message_id;await this.store!.save();}
+    }
+  }
+  updates(offset:number,signal?:AbortSignal): Promise<BotUpdate[]> { return this.call('getUpdates',{offset,timeout:25,allowed_updates:['message','callback_query']},signal); }
   ack(id:string): Promise<unknown> { return this.call('answerCallbackQuery',{callback_query_id:id}); }
   isOwner(u:BotUpdate): boolean {
     const m=u.message, q=u.callback_query;

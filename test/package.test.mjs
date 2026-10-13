@@ -67,7 +67,7 @@ test('actual npm archive installs with runtime dependencies only, exposes CLI, s
     await writeFile(join(home, '.env'), "TELEGRAM_BOT_TOKEN='fixture-only'\n");
     const preload = join(root, 'offline.mjs');
     await writeFile(preload, "import timers from 'node:timers/promises';import {syncBuiltinESMExports} from 'node:module';const pause=timers.setTimeout;timers.setTimeout=(ms,v,o)=>pause(Math.min(ms,30),v,o);syncBuiltinESMExports();globalThis.fetch=async()=>{throw new Error('No external account calls in package test')};");
-    const child = spawn(process.execPath, [executable, 'start'], { cwd: root, env: { ...env, NODE_OPTIONS: '--import ' + JSON.stringify(preload) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [executable, 'run'], { cwd: root, env: { ...env, NODE_OPTIONS: '--import ' + JSON.stringify(preload) }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; let ready;
     const started = new Promise(resolveStarted => { ready = resolveStarted; });
     const append = chunk => { output += chunk; if (output.includes('Календарь unavailable')) ready(); };

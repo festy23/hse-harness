@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runProcess, runningPid } from './service.js';
 import { SetupIssue } from './errors.js';
 import { SetupState } from './state.js';
+import { managedInstallation, runtimeAPI } from './updates.js';
 
 const unitName = 'hse-harness.service';
 
@@ -19,6 +20,8 @@ export function serviceUnit(options: { node: string; executable: string; home: s
   if (!Number.isSafeInteger(options.uid) || options.uid <= 0 || !Number.isSafeInteger(options.gid) || options.gid < 0) {
     throw new SetupIssue('Устанавливай бота от отдельного непривилегированного пользователя, например study');
   }
+  if (/[\r\n\0]/.test(options.home)) throw new SetupIssue('Путь содержит неподдерживаемый символ');
+  for (const key of Object.keys(options.paths)) if (!/^(DOTENV_CONFIG_PATH|STUDY_CONFIG|STUDY_DATA_DIR|STUDY_SECRETS_DIR)$/.test(key)) throw new SetupIssue('Сервис принимает только пути личных данных');
   const environment = { NODE_ENV: 'production', HSE_HARNESS_HOME: options.home, ...options.paths };
   return `[Unit]
 Description=HSE HARNESS study assistant
@@ -30,10 +33,11 @@ Type=simple
 User=${options.uid}
 Group=${options.gid}
 WorkingDirectory=${options.home.replaceAll('%', '%%')}
-ExecStart=${quote(options.node, true)} ${quote(options.executable, true)} run
+ExecStart=${quote(options.node, true)} ${quote(options.executable, true)}
 ${Object.entries(environment).map(([key, value]) => `Environment=${quote(`${key}=${value}`)}`).join('\n')}
 Restart=on-failure
 RestartSec=10
+KillMode=control-group
 TimeoutStopSec=90
 UMask=0077
 NoNewPrivileges=true
@@ -65,13 +69,17 @@ export async function serviceCLI(args: string[]): Promise<number> {
   const home = process.env.HSE_HARNESS_HOME;
   if (!home) throw new SetupIssue('Установка сервиса доступна через установленную npm-команду hse-harness');
   const paths = Object.fromEntries(['DOTENV_CONFIG_PATH', 'STUDY_CONFIG', 'STUDY_DATA_DIR', 'STUDY_SECRETS_DIR'].map(key => [key, process.env[key]! ]));
-  const unit = serviceUnit({ node: process.execPath, executable: fileURLToPath(new URL('../../bin/hse-harness.mjs', import.meta.url)), home, uid: user.uid, gid: user.gid, paths });
-  if (flag === '--dry-run') { console.log(unit); return 0; }
-  if (process.env.npm_command === 'exec') throw new SetupIssue('Для постоянного сервиса установи пакет через npm install -g @ivan-boss/hse-harness, затем повтори команду. Не используй временный кэш npx.');
+  const buildUnit = (executable: string) => serviceUnit({ node: process.execPath, executable, home, uid: user.uid, gid: user.gid, paths });
+  if (flag === '--dry-run') { console.log(buildUnit(join(home, 'runtime', 'launcher.mjs'))); return 0; }
+  const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
+  if (!managedInstallation(packageRoot)) throw new SetupIssue('Для постоянного сервиса установи пакет через npm install -g @ivan-boss/hse-harness, затем повтори команду. Не используй временный кэш npx или исходники.');
   const state = new SetupState(); await state.load();
   if (!state.config.ownerId || !process.env.TELEGRAM_BOT_TOKEN) throw new SetupIssue('Сначала подключи Telegram: hse-harness telegram');
-  if (await runningPid()) throw new SetupIssue('Перед установкой сервиса останови ручной экземпляр бота');
+  if (await runningPid()) throw new SetupIssue('Перед первоначальной установкой supervisor останови прежний экземпляр бота: hse-harness service stop или Ctrl+C. Это одноразовый переход с 0.1.0.');
   await mkdir(home, { recursive: true, mode: 0o700 });
+  console.log('Подготавливаю проверенный исходный выпуск для стабильного supervisor…');
+  const installedRuntime = await (await runtimeAPI()).installRuntime({ home, packageRoot, node: process.execPath });
+  const unit = buildUnit(installedRuntime.launcher);
   const staging = await mkdtemp(join(tmpdir(), 'hse-service-'));
   try {
     const file = join(staging, unitName); await writeFile(file, unit, { mode: 0o600 });

@@ -8,3 +8,4 @@ secrets/
 *.log
 coverage/
 config.local.json
+runtime-manifest.json

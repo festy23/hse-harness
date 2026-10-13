@@ -8,6 +8,7 @@ import * as rendering from './terminal.js';
 import type { SetupConnections, SetupUI, SetupSection } from './ports.js';
 import { icons } from './icons.js';
 import { showTelegramAccess } from './telegram-access.js';
+import { formatRuntimeStatus, installedRuntimeStatus, updatesCLI } from './updates.js';
 
 const help = `HSE HARNESS
 
@@ -21,6 +22,12 @@ hse-harness model              подписка ChatGPT и модель
 hse-harness calendars          расписание и дедлайны
 hse-harness status             сохранённые настройки
 hse-harness start              запуск бота в текущем терминале
+hse-harness run                прямой запуск без supervisor и подхвата обновлений
+hse-harness updates status     установленная и работающая версии, этап обновления
+hse-harness updates enable     включить применение установленных npm-обновлений
+hse-harness updates disable    оставить текущую версию, выключить применение
+hse-harness updates retry      повторить подготовку ожидающей версии
+hse-harness updates rollback   откат к проверенному предыдущему выпуску
 hse-harness paths              расположение личных данных
 hse-harness import /путь        перенос старой установки в пустой каталог
 hse-harness service install    автозапуск на Linux через systemd
@@ -29,10 +36,14 @@ hse-harness service logs       логи сервиса
 hse-harness service stop       остановка сервиса
 hse-harness service restart    перезапуск сервиса
 hse-harness service uninstall  удалить сервис, сохранив личные данные
-hse-harness --version          версия приложения
+hse-harness --version          версия установленного npm-пакета
 
 ↑ ↓ — выбрать · Enter — подтвердить · Ctrl+C — отменить
 Google / Яндекс / iCloud Calendar
+Постоянный npm start/service: автоматическое применение после npm update -g.
+Первый переход с 0.1.0 требует одной остановки и установки supervisor.
+Supervisor проверяет отдельную установку; он не знает код выхода чужого npm update.
+npx, исходники и прямой run не наблюдают глобальные обновления.
 Из исходников: npm run harness -- <команда>; настройка: npm run harness -- configure`;
 
 type View = Pick<typeof rendering, 'welcome' | 'showReport' | 'step' | 'success' | 'failure' | 'finish'>;
@@ -51,6 +62,7 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
   const print = overrides.print ?? console.log;
   const command = args[0];
   if (command === 'help' || command === '--help' || command === '-h') { print(help); return 0; }
+  if (command === 'updates') return updatesCLI(args.slice(1), { print });
   const valid = ['start', 'status', 'telegram-chats', 'configure', ...sections.map(section => section.id)];
   if (args.length > 1 || (command && !valid.includes(command))) throw new SetupIssue('Неизвестная команда. Справка: hse-harness help');
   const state = overrides.state ?? new SetupState();
@@ -59,6 +71,10 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
   const service = overrides.service ?? new ServiceControl(state.root);
   const view = overrides.view ?? rendering;
   const report = async () => setupReport(state, await service.pid());
+  const showUpdates = async () => {
+    if (process.env.HSE_HARNESS_HOME) ui.note(formatRuntimeStatus(await installedRuntimeStatus()), 'Версии и обновления');
+    else ui.note('Запуск из исходников: автоматическое применение глобальных npm-обновлений не включено.');
+  };
   const start = async (): Promise<number | undefined> => {
     const result = await service.start(state.config, message => ui.note(message));
     if (result.kind === 'already-running') {
@@ -69,7 +85,7 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
     return result.code;
   };
   if (command === 'start') return await start() ?? 0;
-  if (command === 'status') { view.showReport(await report()); ui.note('Показаны сохранённые данные. Реальные соединения проверяются командой /status в боте.'); return 0; }
+  if (command === 'status') { view.showReport(await report()); await showUpdates(); ui.note('Показаны сохранённые данные. Реальные соединения проверяются командой /status в боте.'); return 0; }
   if (command === 'telegram-chats') { showTelegramAccess(state.config, ui); return 0; }
   if (!(overrides.interactive ?? process.stdin.isTTY)) throw new SetupIssue('Открой интерактивный терминал и выполни hse-harness (из исходников: npm run harness). Справка: hse-harness help');
 
@@ -123,12 +139,14 @@ export async function runCLI(args: string[] = [], overrides: Partial<CLIDependen
           ...(section.id === 'telegram' ? [{ id: 'telegram-chats', label: `${icons.status} Разрешённые Telegram-чаты`, hint: `${state.config.chats.length} источников` }] : []),
         ]),
         { id: 'status', label: `${icons.status} Посмотреть настройки` },
+        { id: 'updates', label: '🔄 Версии и автоматическое применение обновлений', hint: 'установленная версия и работающая версия' },
         { id: 'exit', label: `${icons.exit} Выйти` },
       ], current.completed === current.total ? 'start' : 'configure');
       if (action === 'exit') { view.finish('До встречи! Настройки сохранены.'); return 0; }
       try {
         if (action === 'start') { const code = await start(); if (code !== undefined) return code; }
         else if (action === 'status') view.showReport(current);
+        else if (action === 'updates') await showUpdates();
         else if (action === 'telegram-chats') showTelegramAccess(state.config, ui);
         else if (action === 'configure') await configure();
         else await runSection(action as SetupSection);

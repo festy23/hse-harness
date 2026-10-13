@@ -23,7 +23,7 @@ export class Scheduler {
       const latest=jobs[0]!;
       if(!this.store.state.jobs.some(j=>j.id===latest.id))continue;
       const late=now-latest.due>120_000;
-      await this.bot.send(late ? `Напоминание восстановлено с задержкой.\n${latest.text.replace(/^До сдачи осталось[^:]*:/,'Проверь актуальный срок:')}` : latest.text);
+      await this.bot.send(late ? `Напоминание восстановлено с задержкой.\n${latest.text.replace(/^До сдачи осталось[^:]*:/,'Проверь актуальный срок:')}` : latest.text,undefined,`reminder:${latest.id}`);
       for(const j of jobs) this.store.state.delivered[j.id]=now;
       await this.store.save();
     }
@@ -40,18 +40,22 @@ export class Scheduler {
     this.store.state.notices[key]=t.status==='cancelled' ? `Отмена: ${t.course} — ${t.title}` : `Изменение/близкий срок: ${t.course} — ${t.title}\n${t.deadline ? prettyTime(t.deadline) : 'Срок уточняется'}${t.disputed?'\nСрок спорный.':''}`;
     await this.store.save();await this.flushNotices(now);
   }
-  private async flushNotices(now:number):Promise<void> {
+  async flushNotices(now:number):Promise<void> {
     for(const [key,text] of Object.entries(this.store.state.notices)) {
-      if(!this.store.state.delivered[key])await this.bot.send(text);
+      if(!this.store.state.delivered[key])await this.bot.send(text,undefined,key);
       this.store.state.delivered[key]=now;delete this.store.state.notices[key];await this.store.save();
     }
   }
   async digests(now=Date.now()):Promise<void> {
     const hour=moscowHour(now);
-    if (hour!==10 && hour!==20) return;
-    const id=`digest:${moscowDate(now)}:${hour}`;
-    if(this.store.state.delivered[id] || this.store.state.queue.some(x=>x.id===id)) return;
-    this.store.state.queue.push({id,sources:[],digest:hour===10?'morning':'evening'});
-    await this.store.save();
+    for(const start of [10,20]) {
+      const id=`digest:${moscowDate(now)}:${start}`;
+      if(this.store.state.delivered[id] || this.store.state.missedDigests[id] || this.store.state.queue.some(x=>x.id===id))continue;
+      if(hour>=start&&hour<start+2)this.store.state.queue.push({id,sources:[],digest:start===10?'morning':'evening'});
+      else if(hour>=start+2)this.store.state.missedDigests[id]=now;
+      else continue;
+      await this.store.save();
+    }
   }
+  nextReminder(now=Date.now()):number|undefined { return this.store.state.jobs.filter(j=>!this.store.state.delivered[j.id]&&j.due>=now).sort((a,b)=>a.due-b.due)[0]?.due; }
 }

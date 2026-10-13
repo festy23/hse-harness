@@ -11,13 +11,14 @@ export function textPart(node:MessageStructureObject|undefined):MessageStructure
   return children.map(textPart).find(n=>n?.type==='text/plain') ?? children.map(textPart).find(Boolean);
 }
 export class MailSource {
-  constructor(readonly config:Config,readonly store:Store) {}
+  constructor(readonly config:Config,readonly store:Store,readonly continuing:()=>boolean=()=>true) {}
   async poll():Promise<void> {
     const client=new ImapFlow({host:'imap.yandex.ru',port:993,secure:true,logger:false,connectionTimeout:20_000,socketTimeout:30_000,auth:{user:secret('YANDEX_ADDRESS'),pass:secret('YANDEX_APP_PASSWORD')}});
     await client.connect();
     try {
       const folders=this.config.folders.length ? this.config.folders : (await client.list()).filter(f=>!['\\Trash','\\Junk','\\Drafts'].includes(f.specialUse??'')).map(f=>f.path);
       for(const folder of folders) {
+        if(!this.continuing())return;
         const lock=await client.getMailboxLock(folder,{readOnly:true});
         try {
           if(!client.mailbox) throw new Error('Папка не открыта');
@@ -27,8 +28,10 @@ export class MailSource {
           const found=await client.search({since:new Date('2026-08-31T00:00:00Z')},{uid:true});
           const ids=(Array.isArray(found)?found:[]).filter(uid=>uid>last).sort((a,b)=>a-b);
           for(let i=0;i<ids.length;i+=25) {
+            if(!this.continuing())return;
             const messages=await client.fetchAll(ids.slice(i,i+25),{uid:true,envelope:true,internalDate:true,bodyStructure:true},{uid:true});
             for(const m of messages) {
+              if(!this.continuing())return;
               if(!m.internalDate) throw new Error('IMAP не вернул дату письма');
               if(+new Date(m.internalDate)>=+new Date(HISTORY_FROM)) {
                 const part=textPart(m.bodyStructure);

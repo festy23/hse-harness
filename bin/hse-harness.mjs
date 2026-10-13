@@ -31,6 +31,9 @@ if (major < 22 || (major === 22 && minor < 19)) {
     } else if (args[0] === 'service') {
       const { serviceCLI } = await import('../dist/cli/system-service.js');
       process.exitCode = await serviceCLI(args.slice(1));
+    } else if (args[0] === 'updates') {
+      const { updatesCLI } = await import('../dist/cli/updates.js');
+      process.exitCode = await updatesCLI(args.slice(1));
     } else if (args[0] === 'import') {
       if (args.length !== 2) throw new Error('Использование: hse-harness import /путь/к/старой/установке');
       const { importInstallation } = await import('../dist/cli/import-installation.js');

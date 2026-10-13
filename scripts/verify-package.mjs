@@ -17,7 +17,7 @@ for (const path of paths.filter(path => !path.startsWith('node_modules/'))) {
     throw new Error(`В npm-пакет попал локальный файл: ${path}`);
   }
 }
-for (const path of ['bin/hse-harness.mjs', 'dist/cli.js', 'dist/main.js', 'dist/cli/system-service.js', 'dist/cli/import-installation.js', 'scripts/process.mjs', 'docs/research/hse-software-engineering-bpi243.md', 'node_modules/@earendil-works/pi-coding-agent/package.json', 'node_modules/@earendil-works/pi-codemode/package.json']) {
+for (const path of ['bin/hse-harness.mjs', 'dist/cli.js', 'dist/main.js', 'dist/cli/system-service.js', 'dist/cli/import-installation.js', 'scripts/process.mjs', 'runtime/supervisor.mjs', 'runtime/installation.mjs', 'runtime/releases.mjs', 'runtime-manifest.json', 'docs/research/hse-software-engineering-bpi243.md', 'node_modules/@earendil-works/pi-coding-agent/package.json', 'node_modules/@earendil-works/pi-codemode/package.json']) {
   if (!paths.includes(path)) throw new Error(`В npm-пакете отсутствует ${path}`);
 }
 const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));

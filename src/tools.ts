@@ -8,6 +8,7 @@ import type { Scheduler } from './scheduler.js';
 import type { Store } from './store.js';
 import type { PiAssistant } from './pi.js';
 import type { TelegramSource } from './telegram.js';
+import { applyTaskOperation } from './worker/task-operations.js';
 
 function tool<T extends TSchema>(name:string,description:string,parameters:T,fn:(args:Static<T>)=>Promise<unknown>):ToolDefinition<T> {
   return {name,label:name,description,parameters,executionMode:'sequential',async execute(_id,args) {
@@ -47,13 +48,7 @@ export function studyTools(d:{calendar:Calendar;approvals:Approvals;bot:Notifier
       const normalized=a.deadlines.map(deadline).sort((x,y)=>+new Date(x.value)-+new Date(y.value));
       let t=validateTask({id:a.id,title:a.title,course:a.course,status:a.status as Task['status'],deadline:normalized[0]?.value,
         deadlineBasis:normalized[0]?.basis==='personal-date-rule'?'personal-date-rule':a.basis as Task['deadlineBasis'],sources:a.sources,notes:a.notes,disputed:a.disputed||new Set(normalized.map(x=>x.value)).size>1});
-      await d.scheduler.transaction(async()=>{
-        const previous=(await d.calendar.listTasks()).find(x=>x.id===t.id);
-        if(['done','submitted'].includes(t.status) && previous?.status!==t.status && !d.pi.ownerTurn) throw new Error('Личный статус может менять только владелец в своем диалоге');
-        if(!d.pi.ownerTurn && previous && ['done','submitted'].includes(previous.status) && t.status==='open')t={...t,status:previous.status};
-        await d.calendar.putTask(t);await d.scheduler.sync(await d.calendar.listTasks());
-        if(d.store.state.bootstrapFinished) await d.scheduler.urgent(t,previous);
-      });
+      t=await applyTaskOperation(d.calendar,d.scheduler,d.store,d.pi.turnId,t,d.pi.ownerTurn);
       return {task:t,calendarUpdated:Boolean(t.deadline)||t.status==='cancelled'};
     }),
     tool('get_schedule','Занятия из календаря расписания в указанный период.',Type.Object({from:Type.String(),to:Type.String()}),async a=>{
@@ -65,7 +60,7 @@ export function studyTools(d:{calendar:Calendar;approvals:Approvals;bot:Notifier
     tool('propose_lesson_change','Запроси одобрение изменения занятия в исходном расписании.',Type.Object({lessonId:Type.String(),start:Type.String(),end:Type.String()}),async a=>({draft:await d.approvals.propose('lesson',{lessonId:a.lessonId,start:deadline(a.start).value,end:deadline(a.end).value})})),
     tool('notify_owner','Личное важное уведомление владельцу. Не использовать вместо финального ответа на его вопрос.',Type.Object({text:Type.String({minLength:1,maxLength:3500})}),async a=>{
       const key=`notice:${d.pi.turnId}:${hash(a.text)}`;
-      if(!d.store.state.delivered[key]){await d.bot.send(a.text);d.store.state.delivered[key]=Date.now();await d.store.save();}
+      if(!d.store.state.delivered[key]){await d.bot.send(a.text,undefined,key);d.store.state.delivered[key]=Date.now();await d.store.save();}
       return {sent:true};
     }),
     tool('read_chat_history','Контекст только разрешенного чата, включая исходные авторов/ответы.',Type.Object({chat:Type.String(),limit:Type.Integer({minimum:1,maximum:100})}),async a=>d.telegram.history(a.chat,a.limit)),

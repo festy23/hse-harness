@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, open } from 'node:fs/promises';
 import { createAgentSession, createExtensionRuntime, ModelRuntime, SessionManager, SettingsManager, type ResourceLoader, type ToolDefinition, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { secretsDir, dataDir,legacyProfile,type StudyProfile } from './config.js';
 import type { Store } from './store.js';
@@ -80,6 +80,7 @@ export class PiAssistant {
   }
   async prompt(text:string,owner=false):Promise<string> {
     this.ownerTurn=owner;
+    this.manager.appendCustomEntry('hse-operation-start',{turnId:this.turnId});
     const keys=new Map<string,string>(),failed=new Set<string>();
     const unsub=this.session.subscribe(e=>{
       if(e.type==='tool_execution_start' && ['update_task','propose_question','propose_lesson_change','notify_owner'].includes(e.toolName)) {
@@ -94,7 +95,47 @@ export class PiAssistant {
     const last=this.session.messages.at(-1);
     if(last?.role==='assistant' && (last.stopReason==='error' || last.stopReason==='aborted')) throw new Error(last.errorMessage??'Pi не завершил ответ');
     if(failed.size)throw new Error('Важное действие инструмента не завершено; исходные сообщения оставлены в очереди');
-    return this.session.getLastAssistantText() ?? '';
+    const answer=this.session.getLastAssistantText() ?? '';
+    this.manager.appendCustomEntry('hse-operation-result',{turnId:this.turnId,answer});
+    await this.checkpoint();
+    return answer;
+  }
+  /** Operational markers live in the existing Pi JSONL; they are not another memory store. */
+  completedTurn(turnId:string):string|undefined {
+    if(!this.manager)return undefined;
+    const entries=this.manager.getEntries();
+    for(let i=entries.length-1;i>=0;i--){
+      const e=entries[i]!;
+      if(e.type==='custom'&&e.customType==='hse-operation-result'){
+        const data=e.data as {turnId?:string;answer?:string};
+        if(data?.turnId===turnId&&typeof data.answer==='string')return data.answer;
+      }
+      if(e.type==='custom'&&e.customType==='hse-operation-start'&&(e.data as {turnId?:string})?.turnId===turnId){
+        const following=entries.slice(i+1);
+        const messages=following.filter(entry=>entry.type==='message').map(entry=>entry.message);
+        if(messages.some(message=>message.role==='toolResult'&&message.isError))return undefined;
+        const last=messages.at(-1);
+        if(last?.role==='assistant'&&['stop','length'].includes(last.stopReason)){
+          const answer=last.content.filter(part=>part.type==='text').map(part=>part.text).join('');
+          this.manager.appendCustomEntry('hse-operation-result',{turnId,answer,recovered:true});
+          return answer;
+        }
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+  async checkpoint():Promise<void> {
+    // SessionManager appends synchronously in the pinned Pi SDK. Once prompt has
+    // settled, sync those bytes and the refreshed auth file before quiescent ACK.
+    const paths=[this.manager?.getSessionFile(),join(secretsDir(),'pi-auth.json'),join(secretsDir(),'telegram.session'),join(secretsDir(),'google.json'),join(dataDir(),'models.json')];
+    for(const path of paths){
+      if(!path)continue;
+      let handle;
+      try{handle=await open(path,'r+');await handle.sync();}
+      catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      finally{await handle?.close();}
+    }
   }
   search(query:string):unknown[] {
     return this.manager.getEntries().filter(e=>JSON.stringify(e).toLowerCase().includes(query.toLowerCase())).slice(-8).map(e=>JSON.stringify(e).slice(0,12_000));

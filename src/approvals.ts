@@ -6,6 +6,7 @@ export interface ApprovalSender {
   question(chat:string,text:string,randomId:string): Promise<string>;
   lesson(id:string,start:string,end:string): Promise<void>;
   previewLesson?(id:string):Promise<string>;
+  lessonMatches?(id:string,start:string,end:string):Promise<boolean>;
 }
 export class Approvals {
   private inFlight=new Set<string>();
@@ -25,7 +26,7 @@ export class Approvals {
     const {kind,payload}=a;
     await this.bot.send(kind === 'question' ? `Отправить вопрос в чат ${payload.chat}?\n\n${payload.text}` : `Изменить занятие ${payload.lessonId}?\n${payload.preview??''}\nНовый интервал: ${payload.start} → ${payload.end}`, [[
       {text:'Подтвердить',callback_data:`approve:${a.id}`},{text:'Отклонить',callback_data:`reject:${a.id}`},
-    ]]);
+    ]],`approval:${a.id}`);
     a.notified=true;await this.store.save();
   }
   async decide(id:string, accept:boolean, now=Date.now()): Promise<void> {
@@ -43,7 +44,20 @@ export class Approvals {
     if (a.kind === 'question') {
       if (!this.allowedChats.has(a.payload.chat!)) throw new Error('Чат больше не разрешен');
       a.messageId=await this.sender.question(a.payload.chat!,a.payload.text!,a.randomId);
-    } else await this.sender.lesson(a.payload.lessonId!,a.payload.start!,a.payload.end!);
+    } else {
+      const id=a.payload.lessonId!,start=a.payload.start!,end=a.payload.end!;
+      if(!await this.sender.lessonMatches?.(id,start,end)){
+        if(this.sender.previewLesson){
+          const current=await this.sender.previewLesson(id);
+          if(a.payload.preview===undefined||current!==a.payload.preview){
+            a.state='rejected';
+            this.store.state.notices[`stale-lesson:${a.id}`]='Занятие изменилось после подготовки черновика. Старое одобрение отменено; для нового переноса нужно новое подтверждение.';
+            await this.store.save();throw new Error('Занятие изменилось; требуется новый черновик и согласие');
+          }
+        }
+        await this.sender.lesson(id,start,end);
+      }
+    }
     a.state='sent'; a.sent=now; await this.store.save();
     }finally{this.inFlight.delete(a.id);}
   }
@@ -59,7 +73,7 @@ export class Approvals {
     for (const a of this.store.state.approvals) {
       const key=`no-answer:${a.id}`;
       if (a.kind==='question' && a.state==='sent' && !a.answered && a.sent && now-a.sent >= 86400_000 && !this.store.state.delivered[key]) {
-        await this.bot.send(`На вопрос в чате ${a.payload.chat} нет ответа сутки. Нужна твоя помощь.\n${a.payload.text}`);
+        await this.bot.send(`На вопрос в чате ${a.payload.chat} нет ответа сутки. Нужна твоя помощь.\n${a.payload.text}`,undefined,key);
         this.store.state.delivered[key]=now; await this.store.save();
       }
     }

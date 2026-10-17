@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type {OperationContext} from './operations.js';
 
 export const TZ = 'Europe/Moscow';
 export const HISTORY_FROM = '2026-09-01T00:00:00+03:00';
@@ -26,10 +27,10 @@ export interface Task {
 }
 export interface Lesson { id: string; title: string; start: string; end: string; allDay?:boolean }
 export interface Calendar {
-  listTasks(): Promise<Task[]>;
-  putTask(task: Task): Promise<void>;
-  lessons(from: string, to: string): Promise<Lesson[]>;
-  changeLesson(id: string, start: string, end: string): Promise<void>;
+  listTasks(ctx?:OperationContext): Promise<Task[]>;
+  putTask(task: Task,ctx?:OperationContext): Promise<void>;
+  lessons(from: string, to: string,ctx?:OperationContext): Promise<Lesson[]>;
+  changeLesson(id: string, start: string, end: string,ctx?:OperationContext): Promise<void>;
 }
 export interface Job { id: string; taskId: string; due: number; text: string }
 export const hash = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -53,9 +54,8 @@ export function moscowDate(at: number): string {
   return new Date(at + 3 * 3600_000).toISOString().slice(0, 10);
 }
 export function moscowHour(at: number): number { return new Date(at + 3 * 3600_000).getUTCHours(); }
-export function prettyTime(value: string): string {
-  return new Intl.DateTimeFormat('ru-RU', {timeZone: TZ, dateStyle: 'medium', timeStyle: 'short'}).format(new Date(value));
-}
+const timeFormatter=new Intl.DateTimeFormat('ru-RU', {timeZone: TZ, dateStyle: 'medium', timeStyle: 'short'});
+export function prettyTime(value: string): string {return timeFormatter.format(new Date(value));}
 export function reminderJobs(t: Task): Job[] {
   if (!t.deadline || ['submitted', 'cancelled'].includes(t.status)) return [];
   const time = +new Date(t.deadline);

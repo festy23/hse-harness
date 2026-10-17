@@ -67,6 +67,12 @@ test('manifest rejects incompatible state, Pi, engine, bootstrap and prereleases
   const valid = { ...manifest('0.1.1'), inventory: [{ path: 'dist/main.js' }] }; assertManifest(valid, '0.1.1');
   for (const changed of [{ piVersion: '2' }, { protocolVersion: 2 }, { stateSchemaVersion: 3 }, { minSupervisorVersion: '2.0.0' }, { writableStateVersion: 3 }, { engines: { node: '>=99' } }, { esbuild: { ...ESBUILD_POLICY, scriptSha256: 'bad' } }, { version: '0.1.1-beta.1' }]) assert.throws(() => assertManifest({ ...valid, ...changed }, changed.version || '0.1.1'));
 });
+test('supervisor patch accepts older stable minimums and rejects malformed or future requirements', () => {
+  const valid = { ...manifest('0.1.1'), inventory: [{ path: 'dist/main.js' }] };
+  for (const minimum of ['1.0.0', '1.0.1']) assertManifest({ ...valid, minSupervisorVersion: minimum }, '0.1.1');
+  for (const minimum of ['1.0.2', '2.0.0', '1.0.1-beta', '01.0.0', undefined, 1])
+    assert.throws(() => assertManifest({ ...valid, minSupervisorVersion: minimum }, '0.1.1'), /incompatible/);
+});
 test('exact tarball is installed with real npm; identity reuse validates complete runtime and corruption', { timeout: 180000 }, async t => {
   const fixture = await fixtures(t); const registryFixture = await registry(t, fixture); const home = await temporary(t);
   const store = new ReleaseStore(home, { npm, registry: registryFixture.url, timeout: 90000 });
@@ -107,6 +113,14 @@ test('cancellation stops only the installer process group before returning', { t
 test('installer timeout is bounded and does not expose output credentials', { timeout: 10000 }, async t => {
   const home = await temporary(t);
   await assert.rejects(runInstaller(process.execPath, ['-e', "console.log('secret-test-token');setInterval(()=>{},50)"], { cwd: home, env: {}, timeout: 100 }), error => /timed out/.test(error.message) && !error.message.includes('secret'));
+});
+test('cancellation during executable access prevents starting the installer', async t => {
+  const home = await temporary(t), marker = join(home, 'started');
+  const controller = new AbortController();
+  const operation = runInstaller(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`], { cwd: home, env: {}, signal: controller.signal });
+  queueMicrotask(() => controller.abort());
+  await assert.rejects(operation, { name: 'AbortError' });
+  await assert.rejects(access(marker), { code: 'ENOENT' });
 });
 test('GC protects all referenced releases and retains unknown symlinks', async t => {
   const home = await temporary(t); const store = new ReleaseStore(home, { npm }); await store.initialize();

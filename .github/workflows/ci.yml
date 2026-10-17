@@ -25,6 +25,13 @@ jobs:
       - run: npm install -g npm@${{ matrix.npm }}
       - run: npm ci
       - run: npm run check
+      - run: npm run benchmark:async > "$RUNNER_TEMP/hse-async-benchmark.log"
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: async-benchmark-linux-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/hse-async-benchmark.log
+          if-no-files-found: warn
       - run: npm run test:e2e
       - run: npm run test:e2e:managed
       - run: npm run test:updates
@@ -52,6 +59,13 @@ jobs:
       - run: npm install -g npm@12.2.0
       - run: npm ci
       - run: npm run check
+      - run: npm run benchmark:async > "$RUNNER_TEMP/hse-async-benchmark.log"
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: async-benchmark-macos
+          path: ${{ runner.temp }}/hse-async-benchmark.log
+          if-no-files-found: warn
       - run: npm run test:e2e:managed
       - run: npm run test:updates
       - run: npm run test:package

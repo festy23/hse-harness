@@ -28,30 +28,41 @@ globalThis.fetch=async(input,options)=>{
   const clock=response.headers.get('x-test-now');if(clock)now=Number(clock);
   return response;
 };
-async function wire(path,body={}){
-  const r=await fetch(endpoint+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+async function wire(path,body={},signal){
+  const r=await fetch(endpoint+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal});
   if(!r.ok)throw new Error(`Fixture ${path}: ${r.status}`);
   return r.json();
 }
 
 const channel=new Api.InputPeerChannel({channelId:bigInt(123),accessHash:bigInt(1)});
 function message(m){return new Api.Message({id:m.id,peerId:new Api.PeerChannel({channelId:bigInt(123)}),date:Math.floor(Date.parse(m.date)/1000),message:m.text,...(m.replyTo?{replyTo:new Api.MessageReplyHeader({replyToMsgId:m.replyTo})}:{})});}
-TelegramClient.prototype.connect=async()=>{};
-TelegramClient.prototype.disconnect=async()=>{};
+TelegramClient.prototype.connect=async function(){this.__e2eConnected=true;};
+Object.defineProperty(TelegramClient.prototype,'connected',{get(){return Boolean(this.__e2eConnected);},configurable:true});
+TelegramClient.prototype.disconnect=async function(){this.__e2eConnected=false;};
+TelegramClient.prototype.destroy=TelegramClient.prototype.disconnect;
 TelegramClient.prototype.checkAuthorization=async()=>true;
 TelegramClient.prototype.getDialogs=async()=>[{id:bigInt('-100123'),entity:channel}];
 TelegramClient.prototype.getInputEntity=async()=>channel;
 TelegramClient.prototype.iterMessages=async function*(){for(const m of await wire('/tg/history'))yield message(m);};
-TelegramClient.prototype.invoke=async function(request){
+TelegramClient.prototype.invoke=async function(request,_dc,options){
+  const signal=options?.abortSignal;signal?.throwIfAborted();
+  if(request instanceof Api.messages.GetDialogs){
+    const entity=new Api.Channel({id:bigInt(123),accessHash:bigInt(1),title:'Тестовая учебная группа',photo:new Api.ChatPhotoEmpty(),date:1791104400,megagroup:true});
+    return new Api.messages.Dialogs({dialogs:[new Api.Dialog({peer:new Api.PeerChannel({channelId:bigInt(123)}),topMessage:1,readInboxMaxId:0,readOutboxMaxId:0,unreadCount:0,unreadMentionsCount:0,unreadReactionsCount:0,notifySettings:new Api.PeerNotifySettings({})})],chats:[entity],users:[],messages:[]});
+  }
+  if(request instanceof Api.messages.GetHistory){
+    const messages=(await wire('/tg/history',{},signal)).filter(m=>!request.offsetId||m.id<request.offsetId).sort((a,b)=>b.id-a.id).slice(0,request.limit);
+    return new Api.messages.Messages({messages:messages.map(message),chats:[],users:[]});
+  }
   if(request instanceof Api.updates.GetState)return new Api.updates.State({pts:1,qts:0,date:1791104400,seq:1,unreadCount:0});
   if(request instanceof Api.channels.GetFullChannel)return {fullChat:new Api.ChannelFull({id:bigInt(123),pts:1,about:'Fixture'})};
   if(request instanceof Api.updates.GetDifference)return new Api.updates.DifferenceEmpty({date:1791104400,seq:1});
   if(request instanceof Api.updates.GetChannelDifference){
-    const d=await wire('/tg/difference',{pts:request.pts});
+    const d=await wire('/tg/difference',{pts:request.pts},signal);
     return new Api.updates.ChannelDifference({final:true,pts:d.pts,newMessages:d.messages.map(message),otherUpdates:[],users:[],chats:[]});
   }
   if(request instanceof Api.messages.SendMessage){
-    const sent=await wire('/tg/send',{text:request.message,randomId:request.randomId.toString()});
+    const sent=await wire('/tg/send',{text:request.message,randomId:request.randomId.toString()},signal);
     return new Api.UpdateShortSentMessage({id:sent.id,pts:1,ptsCount:1,date:1791104400});
   }
   throw new Error(`Unexpected MTProto method ${request.className}`);

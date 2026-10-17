@@ -14,7 +14,7 @@ export function showTelegramAccess(config: Pick<Config, 'ownerId' | 'chats'>, ui
     return;
   }
   const entries = config.chats.map((chat, index) =>
-    `${index + 1}. ${chat.title}\n   ID: ${chat.id}\n   👁️ Читать · ✍️ Вопрос после подтверждения`
+    `${index + 1}. ${chat.title}\n   ID: ${chat.id}\n   👁️ Читать${chat.allowQuestions===false?' · Только чтение':' · ✍️ Вопрос после подтверждения'}`
   );
   ui.note(entries.join('\n\n'), `${label} · Разрешённые чаты (${entries.length})`);
   ui.note('👁️ Чтение сообщений и истории — личным Telegram-аккаунтом.\n✍️ Отправка вопроса — от твоего аккаунта после одобрения черновика в боте.\nЧаты вне этого списка читать и использовать для вопросов нельзя.\nОтправка также требует прав Telegram; в канале она может быть запрещена.\nПоказана сохранённая конфигурация, доступность чатов сейчас не проверялась.', '📋 Правила доступа');

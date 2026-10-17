@@ -1,6 +1,7 @@
 import { secret } from './config.js';
 import { randomUUID, createHash } from 'node:crypto';
 import type { Store } from './store.js';
+import type {OperationContext} from './operations.js';
 
 export interface BotUpdate {
   update_id: number;
@@ -14,7 +15,7 @@ export function botIdentity(token:string):string {
   const numeric=/^(\d{1,20}):/.exec(token)?.[1];
   return numeric?`telegram:${BigInt(numeric).toString()}`:`telegram:opaque:${createHash('sha256').update(token).digest('hex').slice(0,24)}`;
 }
-export interface Notifier { send(text:string, buttons?:Buttons, deliveryId?:string): Promise<void> }
+export interface Notifier { send(text:string, buttons?:Buttons, deliveryId?:string,ctx?:OperationContext): Promise<void> }
 export class TelegramBot implements Notifier {
   private readonly sends = new Map<string, Promise<void>>();
   constructor(readonly owner: number, readonly store?:Store) {}
@@ -27,13 +28,13 @@ export class TelegramBot implements Notifier {
     if (!data.ok) throw new BotApiRejection(`Telegram Bot API: ${data.description ?? response.status}`);
     return data.result;
   }
-  async send(text:string, buttons?:Buttons, deliveryId:string=randomUUID()): Promise<void> {
+  async send(text:string, buttons?:Buttons, deliveryId:string=randomUUID(),ctx?:OperationContext): Promise<void> {
     const existing=this.sends.get(deliveryId);if(existing)return existing;
-    const result=this.sendChunks(text,buttons,deliveryId);
+    const result=this.sendChunks(text,buttons,deliveryId,ctx);
     this.sends.set(deliveryId,result);
     try{await result;}finally{this.sends.delete(deliveryId);}
   }
-  private async sendChunks(text:string,buttons:Buttons|undefined,id:string):Promise<void> {
+  private async sendChunks(text:string,buttons:Buttons|undefined,id:string,ctx?:OperationContext):Promise<void> {
     // Никакого Markdown parse_mode: текст модели/источника не исполняется как разметка.
     let delivery=this.store?.state.outbox[id];
     // Payload is frozen before its first external effect, including retries.
@@ -44,6 +45,7 @@ export class TelegramBot implements Notifier {
       this.store.state.outbox[id]=delivery;await this.store.save();
     }
     for (let i=0;i<pieces.length;i++) {
+      ctx?.throwIfAborted();
       const receipt=delivery?.chunks[i];
       if(receipt?.state==='sent')continue;
       const uncertain=receipt?.state==='sending';
@@ -52,10 +54,11 @@ export class TelegramBot implements Notifier {
       try{result=await this.call<{message_id?:number}>('sendMessage', {
       chat_id:this.owner,text:(uncertain?'Повтор после сбоя: предыдущая доставка могла состояться.\n':'')+pieces[i],link_preview_options:{is_disabled:true},
       ...(i === pieces.length-1 && buttons ? {reply_markup:{inline_keyboard:buttons}} : {}),
-      });}catch(error){
+      },ctx?.signal);}catch(error){
         // A parsed API rejection proves no accepted send. A lost response does
         // not, so its sending receipt is deliberately left ambiguous.
         if(receipt&&error instanceof BotApiRejection){receipt.state='pending';await this.store!.save();}
+        if(ctx?.signal.aborted)throw ctx.signal.reason;
         throw error;
       }
       if(receipt){receipt.state='sent';receipt.messageId=result?.message_id;await this.store!.save();}

@@ -44,15 +44,15 @@ test('a notice racing drain does not advance control sequence; closed admission 
 test('failed checkpoint cannot acknowledge quiescent',async()=>{
   const life=new WorkerLifecycle(),replies:Record<string,unknown>[]=[];
   const ctl=new WorkerControl(life,'worker',{prepare:async()=>{},activate:async()=>{},checkpoint:async()=>{throw Error('disk');},finish:async()=>{},notice:async()=>{},health:()=>({})},m=>replies.push(m));
-  try{await ctl.receive(command('prepare',1));await ctl.receive(command('activate',2));await ctl.receive(command('drain',3));assert.equal(replies.at(-1)?.type,'fatal');assert.equal(life.mode,'draining');assert.equal(replies.some(m=>m.type==='quiescent'),false);}finally{ctl.close();}
+  try{await ctl.receive(command('prepare',1));await ctl.receive(command('activate',2));await assert.rejects(()=>ctl.receive(command('drain',3)));assert.equal(replies.at(-1)?.type,'fatal');assert.equal(life.mode,'draining');assert.equal(replies.some(m=>m.type==='quiescent'),false);}finally{ctl.close();}
 });
-test('owner update receipt and offset survive recovery as one operation',()=>fixture(async store=>{
+test('owner update receipt survives recovery without advancing the command coordinator offset',()=>fixture(async store=>{
   await store.enqueueOwner('Сдал ДЗ',10);const recovered=new Store(store.dir);await recovered.load();await recovered.enqueueOwner('Сдал ДЗ',10);
-  assert.equal(recovered.state.queue.length,1);assert.equal(recovered.state.queue[0]?.id,'owner:10');assert.equal(recovered.state.botOffset,11);
+  assert.equal(recovered.state.queue.length,1);assert.equal(recovered.state.queue[0]?.id,'owner:10');assert.equal(recovered.state.botOffset,0);
   recovered.state.queue=[];await recovered.save();await recovered.enqueueOwner('Сдал ДЗ',10);assert.equal(recovered.state.queue.length,0);
 }));
-test('Store.flush retains a previous failed write despite a later successful save',()=>fixture(async store=>{
-  await mkdir(join(store.dir,'operations.json'));await assert.rejects(()=>store.save());await rm(join(store.dir,'operations.json'),{recursive:true});await store.save();await assert.rejects(()=>store.flush());
+test('Store.flush and later saves retain a previous fatal write failure',()=>fixture(async store=>{
+  await mkdir(join(store.dir,'operations.json'));await assert.rejects(()=>store.save());await rm(join(store.dir,'operations.json'),{recursive:true});await assert.rejects(()=>store.save());await assert.rejects(()=>store.flush());
 }));
 test('readonly legacy validation creates no state files and rejects future schema',()=>fixture(async store=>{
   const path=join(store.dir,'operations.json');const legacy={...store.state} as Record<string,unknown>;delete legacy.schemaVersion;delete legacy.outbox;await writeFile(path,JSON.stringify(legacy));
@@ -88,16 +88,16 @@ test('Pi operation result survives recovery without another prompt, including cr
   pi.manager.appendCustomEntry('hse-operation-start',{turnId:'owner:123'});
   pi.manager.appendMessage({role:'user',content:'Дай ответ',timestamp:1});
   pi.manager.appendMessage({role:'assistant',content:[{type:'text',text:'Готовый ответ'}],api:'openai-responses',provider:'openai',model:'fixture',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:2});
-  assert.equal(pi.completedTurn('owner:123'),'Готовый ответ');assert.equal(pi.completedTurn('owner:123'),'Готовый ответ');
+  assert.equal(await pi.completedTurn('owner:123'),'Готовый ответ');assert.equal(await pi.completedTurn('owner:123'),'Готовый ответ');
   assert.equal(pi.manager.getEntries().filter(e=>e.type==='custom'&&e.customType==='hse-operation-result').length,1);
-  assert.equal(pi.completedTurn('owner:other'),undefined);
+  assert.equal(await pi.completedTurn('owner:other'),undefined);
 });
 
 test('bot identity namespaces reused update IDs, resets offset only at activation and preserves prior queue/memory',()=>fixture(async store=>{
   const {botIdentity}=await import('../src/bot.js');
   const oldBot=botIdentity('12345:old-secret'),sameBot=botIdentity('12345:rotated-secret'),newBot=botIdentity('67890:new-secret');
   assert.equal(oldBot,sameBot);assert.equal(oldBot,'telegram:12345');assert.ok(!botIdentity('fixture-secret').includes('fixture-secret'));
-  await store.enqueueOwner('legacy pending answer',10);store.state.sessionPath='/existing/pi.jsonl';store.state.queue[0]!.phase='answer';store.state.queue[0]!.answer='saved answer';await store.save();
+  await store.enqueueOwner('legacy pending answer',10);store.state.botOffset=11;store.state.sessionPath='/existing/pi.jsonl';store.state.queue[0]!.phase='answer';store.state.queue[0]!.answer='saved answer';await store.save();
   const legacyBytes=await readFile(join(store.dir,'operations.json'),'utf8');const prepared=new Store(store.dir);await prepared.load({readOnly:true});
   assert.equal(prepared.state.botIdentity,undefined);assert.equal(prepared.state.botOffset,11);assert.equal(await readFile(join(store.dir,'operations.json'),'utf8'),legacyBytes);
   await prepared.activateBot(oldBot);assert.equal(prepared.state.botOffset,11);await prepared.enqueueOwner('legacy duplicate',10);assert.equal(prepared.state.queue.length,1);
@@ -108,7 +108,7 @@ test('bot identity namespaces reused update IDs, resets offset only at activatio
   const ctl=new WorkerControl(life,'worker',{prepare:async()=>{},activate:async()=>{await candidate.activateBot(newBot);},checkpoint:async()=>{},finish:async()=>{},notice:async()=>{},health:()=>({})},m=>replies.push(m));
   try{await ctl.receive(command('prepare',1));assert.equal(replies.at(-1)?.type,'boot-ready');assert.equal(candidate.state.botOffset,11);assert.equal(await readFile(join(store.dir,'operations.json'),'utf8'),beforeSwitch);await ctl.receive(command('activate',2));}finally{ctl.close();}
   assert.equal(candidate.state.botOffset,0);assert.deepEqual(candidate.state.queue,queueBefore);assert.equal(candidate.state.sessionPath,'/existing/pi.jsonl');
-  await candidate.enqueueOwner('new bot message, same update ID',10);assert.equal(candidate.state.queue.length,2);assert.equal(candidate.state.botOffset,11);assert.equal(candidate.state.queue[1]?.id,`owner:${newBot}:10`);
+  await candidate.enqueueOwner('new bot message, same update ID',10);assert.equal(candidate.state.queue.length,2);assert.equal(candidate.state.botOffset,0);candidate.state.botOffset=11;await candidate.save();assert.equal(candidate.state.queue[1]?.id,`owner:${newBot}:10`);
   await candidate.enqueueOwner('duplicate',10);assert.equal(candidate.state.queue.length,2);
   const recovered=new Store(store.dir);await recovered.load({readOnly:true});assert.equal(recovered.state.botIdentity,newBot);assert.equal(recovered.state.botOffset,11);
 }));
@@ -118,6 +118,6 @@ test('failed source turn cannot borrow a later successful priority-owner respons
   const assistant=(text:string,stopReason:'stop'|'error')=>({role:'assistant' as const,content:text?[{type:'text' as const,text}]:[],api:'openai-responses' as const,provider:'openai',model:'fixture',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason,timestamp:2,...(stopReason==='error'?{errorMessage:'Provider unavailable'}:{})});
   pi.manager.appendCustomEntry('hse-operation-start',{turnId:'source-d'});pi.manager.appendMessage({role:'user',content:'ДЗ D до 16 октября',timestamp:1});pi.manager.appendMessage(assistant('','error'));
   pi.manager.appendCustomEntry('hse-operation-start',{turnId:'owner-priority'});pi.manager.appendMessage({role:'user',content:'Ответь владельцу первым',timestamp:3});pi.manager.appendMessage(assistant('Приоритетный личный ответ.','stop'));pi.manager.appendCustomEntry('hse-operation-result',{turnId:'owner-priority',answer:'Приоритетный личный ответ.'});
-  assert.equal(pi.completedTurn('source-d'),undefined);assert.equal(pi.completedTurn('owner-priority'),'Приоритетный личный ответ.');
+  assert.equal(await pi.completedTurn('source-d'),undefined);assert.equal(await pi.completedTurn('owner-priority'),'Приоритетный личный ответ.');
   assert.equal(pi.manager.getEntries().filter(e=>e.type==='custom'&&e.customType==='hse-operation-result'&&(e.data as {turnId?:string}).turnId==='source-d').length,0);
 });

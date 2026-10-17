@@ -8,9 +8,10 @@ export interface CalendarFeatures {googleCalendar:boolean;icloudCalendar:boolean
 export interface StudyProfile {name:string;university:string;program:string;group:string;course:number;academicYear:string;subjects:string;details:string}
 export const legacyProfile:StudyProfile={name:'Иван',university:'ВШЭ ФКН',program:'Программная инженерия',group:'БПИ243',course:3,academicYear:'2026/27',subjects:'Кодинговые агенты в разработке',details:'Набор 2024; поток C#; майнор: Финансовые рынки; НИС: Нейроинформатика'};
 export interface CalendarSettings {features:CalendarFeatures;calendars:{timetable:CalendarSelection;agent:CalendarSelection}}
+export interface TelegramChat {id:string;title:string;allowQuestions?:boolean}
 export interface Config extends CalendarSettings {
   ownerId: number;
-  chats: {id:string; title:string}[];
+  chats: TelegramChat[];
   folders: string[];
   model: string;
   pollSeconds: number;
@@ -43,7 +44,7 @@ export async function loadConfig(): Promise<Config> {
   if(('timetableId' in raw||'agentCalendarId' in raw)&&!raw.calendars)throw new Error('Обновите старый формат календарей по config.example.json: Google теперь отключен, провайдер выбирается явно');
   const c = {...raw,...calendarSettings(raw)} as unknown as Config;
   if (!Number.isSafeInteger(c.ownerId) || c.ownerId <= 0) throw new Error('Укажите ownerId в config.local.json');
-  if (!Array.isArray(c.chats) || c.chats.some(x => !/^-?\d+$/.test(x.id))) throw new Error('chats должны содержать числовые id');
+  if (!Array.isArray(c.chats) || c.chats.some(x => !x || typeof x.id!=='string' || !/^-?\d+$/.test(x.id) || typeof x.title!=='string' || (x.allowQuestions!==undefined&&typeof x.allowQuestions!=='boolean'))) throw new Error('chats должны содержать числовые id, title и необязательный boolean allowQuestions');
   // A model is required for Pi turns, not for the owner's /start and /status.
   return {...c,model:typeof c.model==='string'?c.model:'',folders:c.folders ?? [],pollSeconds:Math.max(15,c.pollSeconds ?? 60)};
 }

@@ -23,12 +23,13 @@ function publicDescriptor(record) {
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function processGroupAlive(pid) { try { process.kill(-pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; return true; } }
-function signalGroup(child, signal) { try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+function signalGroup(child, signal) { if (!child.pid) return; try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
 
 export async function runInstaller(command, args, { cwd, env, signal, timeout = 180000 } = {}) {
   cancelled(signal);
   if (!isAbsolute(command)) throw new Error('installer executable must be absolute');
   await access(command, constants.X_OK);
+  cancelled(signal);
   const child = spawn(command, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let reason; let bytes = 0; let output = '';
   const stop = failure => {
@@ -37,6 +38,7 @@ export async function runInstaller(command, args, { cwd, env, signal, timeout = 
   };
   const onAbort = () => stop(abortError());
   signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const timer = setTimeout(() => stop(new Error('release installer timed out')), timeout);
   const consume = bytesChunk => {
     bytes += bytesChunk.length;

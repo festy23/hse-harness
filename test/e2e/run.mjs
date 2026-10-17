@@ -157,6 +157,9 @@ try{
   if(startupPending){
     await phase('Личный бот отвечает при недоступном календаре/отсутствии входа Pi, сохраняет сообщение и восстанавливается после настройки без рестарта',async()=>{
       bot('/start');await until(()=>texts().some(t=>t.startsWith('Это основной личный диалог')),'/start while calendar offline');
+      bot('/help');await until(()=>texts().some(t=>t.startsWith('Команды учебного помощника:')),'/help while calendar offline');
+      const help=texts().find(t=>t.startsWith('Команды учебного помощника:'));
+      for(const command of ['start','help','tasks','status','updates','ready'])assert.ok(help.includes(`/${command} — `));
       state.calendarDown=false;
       await until(()=>texts().some(t=>t.startsWith('Модель: сейчас недоступен')),'missing Pi auth visible');
       const prior=state.notifications.length;bot('/status');

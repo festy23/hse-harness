@@ -5,7 +5,7 @@ import { StudyCalendar } from '../src/calendar/study-calendar.js';
 import type { CalendarCollection, CalendarEvent } from '../src/calendar/collection.js';
 import type { Task } from '../src/domain.js';
 import { CalDAVCollection } from '../src/calendar/providers/caldav.js';
-import type { DAVCalendarObject } from 'tsdav';
+import {fetchCalendarObjects, type DAVCalendarObject} from 'tsdav';
 import { createCalendar } from '../src/calendar/index.js';
 import { Store } from '../src/store.js';
 import { mkdtemp,rm } from 'node:fs/promises';
@@ -22,6 +22,22 @@ function davFixture(){
   };
   return {objects,client,setConflict:()=>{conflict=true;}};
 }
+
+test('native tsdav multiget excludes the iCloud collection href and keeps extensionless events',async()=>{
+  const calendar={url:'https://caldav.icloud.com/agent/'};
+  const event=['BEGIN:VCALENDAR','VERSION:2.0','BEGIN:VEVENT','UID:event','DTSTART:20261013T090000Z','DTEND:20261013T100000Z','SUMMARY:Seminar','END:VEVENT','END:VCALENDAR'].join('\r\n');
+  let requests=0;
+  const xml=(href:string,data?:string)=>`<d:response><d:href>${href}</d:href><d:propstat><d:prop><d:getetag>"1"</d:getetag>${data?`<c:calendar-data><![CDATA[${data}]]></c:calendar-data>`:''}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`;
+  const fetcher:typeof fetch=async(_input,options)=>{
+    requests++;const body=String(options?.body);
+    if(body.includes('calendar-multiget'))assert.ok(!body.includes('<d:href>/agent/</d:href>'),'collection href sent as an event to multiget');
+    const responses=requests===1?xml('/agent/')+xml('/agent/opaque-id'):xml('/agent/opaque-id',event);
+    return new Response(`<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">${responses}</d:multistatus>`,{status:207,headers:{'content-type':'application/xml'}});
+  };
+  const wire=davFixture();const client={...wire.client,fetchCalendarObjects:(args:Parameters<typeof fetchCalendarObjects>[0])=>fetchCalendarObjects({...args,fetch:fetcher})};
+  const backend=new CalDAVCollection(client,calendar,'icloud:agent');
+  const events=await backend.list();assert.equal(events.length,1);assert.equal(events[0]?.title,'Seminar');assert.equal(requests,2);
+});
 
 class Collection implements CalendarCollection {
   constructor(readonly identity:string,readonly events=new Map<string,CalendarEvent>()){}
@@ -45,7 +61,7 @@ test('Google выключен по умолчанию; обе календарн
 test('Фабрика не загружает выключенный Google и проверяет flags до подключения обоих провайдеров',async()=>{
   const loaded:string[]=[];
   const registry={icloud:async(id:string)=>{loaded.push(id);return new Collection('icloud:'+id);},google:async()=>{throw new Error('Google не должен загружаться');}};
-  await createCalendar(calendarSettings({}),registry);assert.equal(loaded.length,2);
+  const lazy=await createCalendar(calendarSettings({}),registry);assert.equal(loaded.length,0,'construction performs no network I/O');await lazy.listTasks();await lazy.lessons('2026-10-01','2026-10-02');assert.equal(loaded.length,2);
   loaded.length=0;
   await assert.rejects(()=>createCalendar({features:{googleCalendar:false,icloudCalendar:true},calendars:{timetable:{provider:'icloud',id:'schedule'},agent:{provider:'google',id:'agent'}}},registry),/Google.*отключен/);
   assert.equal(loaded.length,0);

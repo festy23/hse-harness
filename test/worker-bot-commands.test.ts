@@ -34,6 +34,7 @@ globalThis.fetch=async(input,options)=>{
     while(Date.now()<until){state=await readFile(join(dir,'data/operations.json'),'utf8').then(JSON.parse).catch(()=>undefined);if(state?.botOffset===5&&state.health['Бот']==='ok')break;await new Promise(r=>setTimeout(r,30));}
     assert.equal(state?.botOffset,5,'failed /tasks blocked later commands: '+output);
     assert.equal(state.health['Бот'],'ok');
+    assert.ok([...Object.keys(state.notices),...Object.keys(state.outbox)].some(key=>key.startsWith('health:Календарь:')),'health notification must have a durable delivery identity even before transport succeeds');
     const sent=(await readFile(join(dir,'sent.jsonl'),'utf8')).trim().split('\n').map(x=>JSON.parse(x) as string);
     assert.ok(sent.some(x=>x.includes('список работ')&&x.includes('недоступен')));
     assert.ok(sent.some(x=>x.startsWith('{')&&x.includes('"health"')));

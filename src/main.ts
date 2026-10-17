@@ -1,4 +1,5 @@
 import {readFile} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {WorkerLifecycle,WorkerControl,type WorkerCommand} from './worker/lifecycle.js';
 import {CommandCoordinator} from './worker/commands.js';
@@ -76,11 +77,12 @@ async function main():Promise<void>{
     if(error&&fatal(error))throw error;
     if(stopped||cancelled(error))return;
     const value=error?'unavailable':'ok';if(store.state.health[component]===value)return;
-    const previous=store.state.health[component];store.state.health[component]=value;await store.save();
+    const previous=store.state.health[component];store.state.health[component]=value;
     if(error){
       const detail=error instanceof Error&&/^(Требуется подписочный вход:|Модель отсутствует в каталоге:|Выберите модель через)/.test(error.message)?`\n${error.message}`:'';
-      await bot.send(`${component}: сейчас недоступен. Обработка этой части задерживается; после восстановления продолжу с сохраненной позиции.${component==='Модель'?' Проверь подписочный вход и выбранную модель; если исчерпан лимит подписки, нужен его сброс/твое вмешательство.':''}${detail}`).catch(error=>{if(fatal(error))throw error;});
-    }else if(previous==='unavailable'&&store.state.bootstrapFinished)await bot.send(`${component}: работа восстановлена.`).catch(error=>{if(fatal(error))throw error;});
+      store.state.notices[`health:${component}:${randomUUID()}`]=`${component}: сейчас недоступен. Обработка этой части задерживается; после восстановления продолжу с сохраненной позиции.${component==='Модель'?' Проверь подписочный вход и выбранную модель; если исчерпан лимит подписки, нужен его сброс/твое вмешательство.':''}${detail}`;
+    }else if(previous==='unavailable'&&store.state.bootstrapFinished)store.state.notices[`health:${component}:${randomUUID()}`]=`${component}: работа восстановлена.`;
+    await store.save();
     console.log(`${new Date().toISOString()} ${component} ${value}`);
   };
   type Progress={initialComplete:boolean;lastSuccess?:string;continuing?:boolean;lastError?:{at:string;kind:string}};

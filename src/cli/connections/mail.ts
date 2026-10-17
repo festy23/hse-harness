@@ -1,3 +1,4 @@
+import {budgets,createOperation} from '../../operations.js';
 import { secret } from '../../config.js';
 import { SetupCancelled, SetupIssue } from '../errors.js';
 import type { Choice, SetupUI } from '../ports.js';
@@ -14,27 +15,24 @@ interface MailDiscovery {
 
 /** Discovery never downloads messages; always close the connection, including failed auth. */
 export async function mailFolderChoices(client: MailDiscovery, signal?: AbortSignal): Promise<Choice[]> {
+  const operation=createOperation('connect',budgets.mailSlice,signal),parent=signal;signal=operation.signal;
   const cancel = () => client.close();
   signal?.addEventListener('abort', cancel, { once: true });
   try {
-    if (signal?.aborted) throw new SetupCancelled();
+    if(parent?.aborted)throw new SetupCancelled();operation.throwIfAborted();
     await client.connect();
-    if (signal?.aborted) throw new SetupCancelled();
+    if(parent?.aborted)throw new SetupCancelled();operation.throwIfAborted();
     const folders = await client.list();
-    if (signal?.aborted) throw new SetupCancelled();
+    if(parent?.aborted)throw new SetupCancelled();operation.throwIfAborted();
     return folders
       .filter(folder => !['\\Trash', '\\Junk', '\\Drafts'].includes(folder.specialUse ?? ''))
       .map(folder => ({ id: folder.path, label: folder.path }));
   } catch (error) {
-    if (signal?.aborted) throw new SetupCancelled();
-    throw error;
+    if(parent?.aborted)throw new SetupCancelled();operation.throwIfAborted();throw error;
   } finally {
     signal?.removeEventListener('abort', cancel);
-    if (client.usable) {
-      await client.logout().catch(() => client.close());
-    } else {
-      client.close();
-    }
+    const cleanup=setTimeout(()=>client.close(),budgets.cleanup);
+    try{if(client.usable&&!signal.aborted)await client.logout();}catch{}finally{clearTimeout(cleanup);client.close();operation.dispose();}
   }
 }
 

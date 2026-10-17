@@ -38,7 +38,19 @@ class Transport {
     const peerId=peer instanceof Api.InputPeerChannel?new Api.PeerChannel({channelId:peer.channelId}):new Api.PeerChat({chatId:(peer as Api.InputPeerChat).chatId});
     for(const [id,date,text] of [[3,'2026-10-12T12:00:00Z','ДЗ до 20 октября'],[2,'2026-09-01T00:00:00+03:00','ДЗ с начала семестра'],[1,'2026-08-31T20:59:59Z','Старый семестр']] as const)yield new Api.Message({id,date:Date.parse(date)/1000,message:text,peerId});
   }
-  async invoke(request:any){
+  async invoke(request:any,_dc?:number,options?:Api.ApiCallOptions){
+    assert.ok(options?.abortSignal);assert.ok(options.timeout!>0);
+    if(request instanceof Api.messages.GetDialogs){
+      const chats=this.entities.filter(e=>!(e instanceof Api.User)),users=this.entities.filter(e=>e instanceof Api.User);
+      const dialogs=this.entities.map(e=>new Api.Dialog({peer:e instanceof Api.Channel?new Api.PeerChannel({channelId:e.id}):e instanceof Api.User?new Api.PeerUser({userId:e.id}):new Api.PeerChat({chatId:e.id}),topMessage:1,readInboxMaxId:0,readOutboxMaxId:0,unreadCount:0,unreadMentionsCount:0,unreadReactionsCount:0,notifySettings:new Api.PeerNotifySettings({})}));
+      return new Api.messages.Dialogs({dialogs,chats,users,messages:[]});
+    }
+    if(request instanceof Api.contacts.ResolveUsername)return new Api.contacts.ResolvedPeer({peer:new Api.PeerChannel({channelId:this.resolved.id}),chats:this.resolved instanceof Api.User?[]:[this.resolved],users:this.resolved instanceof Api.User?[this.resolved]:[]});
+    if(request instanceof Api.messages.GetHistory){
+      if(request.limit===1){await this.getMessages();return new Api.messages.Messages({messages:[],chats:[],users:[]});}
+      const messages=[];for await(const message of this.iterMessages(request.peer))if(!request.offsetId||message.id<request.offsetId)messages.push(message);
+      return new Api.messages.Messages({messages,chats:[],users:[]});
+    }
     this.requests.push(request.className);
     if(request instanceof Api.messages.CheckChatInvite)return this.invitation;
     if(request instanceof Api.updates.GetState)return new Api.updates.State({pts:1,qts:0,date:1791800000,seq:1,unreadCount:0});
@@ -140,7 +152,14 @@ test('config additions serialize and stale CLI cannot overwrite a dynamically ad
 test('config lock serializes CLI edits before a source merge, preserving unrelated fields',()=>fixture(async(_source,_wire,_store,path)=>{
   const cli=new SetupState(join(path,'..'),path+'.env',path);await cli.load();
   cli.config.model='edited-in-cli';
-  await Promise.all([cli.save(),saveTelegramChat(path,{id:canonical,title:'A',allowQuestions:false},42)]);
+  // Wait for the actual CLI critical section; filesystem lock acquisition has no FIFO guarantee.
+  const hook=cli as unknown as {commitLocked(changes:Map<string,string>):Promise<void>};
+  const original=hook.commitLocked.bind(cli);let entered!:()=>void,release!:()=>void;
+  const locked=new Promise<void>(resolve=>{entered=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+  hook.commitLocked=async changes=>{entered();await gate;await original(changes);};
+  const saving=cli.save();await locked;
+  const merging=saveTelegramChat(path,{id:canonical,title:'A',allowQuestions:false},42);release();
+  await Promise.all([saving,merging]);
   const saved=JSON.parse(await readFile(path,'utf8'));assert.equal(saved.model,'edited-in-cli');assert.equal(saved.chats.length,1);
   await assert.rejects(withConfigWriteLock(path,async()=>{throw Error('fixture failure');}),/fixture failure/);
   await withConfigWriteLock(path,async()=>{});

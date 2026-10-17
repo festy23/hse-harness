@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import {createTelegramClient} from '../../telegram-client.js';
+import {createTelegramClient,telegramDeadline} from '../../telegram-client.js';
+import {Api,type TelegramClient} from 'teleproto';
+import {telegramDialogs,telegramInvoke} from '../../telegram-transport.js';
+import {budgets,withOperation,OperationError} from '../../operations.js';
 import type { UserAuthParams } from 'teleproto/client/auth.js';
 import { secret, secretsDir } from '../../config.js';
 import { writeSecret } from '../../store.js';
@@ -19,10 +22,13 @@ export interface TelegramSetupClient {
   getDialogs(options: { limit: undefined }): Promise<Dialog[]>;
   session: { save(): unknown };
   disconnect(): Promise<void>;
+  destroy?():Promise<void>;
+  invoke?:TelegramClient['invoke'];
 }
 export interface TelegramSetupDependencies {
   createClient?: (session: string, apiId: number, apiHash: string) => TelegramSetupClient;
   sessionPath?: string;
+  networkBudgetMs?:number;
 }
 
 function fail(error: unknown, message: string): never {
@@ -62,7 +68,7 @@ export async function bot(token: string, ui: SetupUI, request: typeof fetch = fe
 export async function telegram(ui: SetupUI, expectedOwnerId?: number, dependencies: TelegramSetupDependencies = {}): Promise<{ ownerId: number; chats: Choice[] }> {
   let client: TelegramSetupClient | undefined;
   let closing: Promise<void> | undefined;
-  const disconnect = () => closing ??= client?.disconnect().catch(() => undefined) ?? Promise.resolve();
+  const disconnect=()=>closing??=client?telegramDeadline(client.destroy?client.destroy():client.disconnect(),budgets.cleanup).catch(()=>{}):Promise.resolve();
   try {
     const path = dependencies.sessionPath ?? join(secretsDir(), 'telegram.session');
     const existing = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
@@ -74,27 +80,43 @@ export async function telegram(ui: SetupUI, expectedOwnerId?: number, dependenci
     client = dependencies.createClient?.(existing.trim(), apiId, secret('TELEGRAM_API_HASH')) ?? await createTelegramClient(existing.trim());
     ui.note('Если Telegram-сессия уже сохранена, повторный код входа не потребуется.');
     // No progress animation here: the SDK can request interactive input during start().
-    await client.start({
-      phoneNumber: () => ui.input({ message: 'Номер Telegram с кодом страны' }),
-      phoneCode: () => ui.input({ message: 'Код Telegram', secret: true }),
-      password: () => ui.input({ message: 'Пароль Telegram 2FA', secret: true }),
-      onError: error => fail(error, 'Вход в Telegram не завершён. Проверь введённые данные и повтори шаг.'),
-    });
-    const ownerId = Number((await client.getMe()).id.toString());
+    let remaining=dependencies.networkBudgetMs??budgets.connect,armedAt=0,timer:NodeJS.Timeout|undefined;
+    let networkTimedOut=false;let expire!:(error:Error)=>void;
+    const expired=new Promise<never>((_,reject)=>{expire=reject;});
+    const pause=()=>{if(timer){clearTimeout(timer);remaining-=performance.now()-armedAt;timer=undefined;}};
+    const arm=()=>{armedAt=performance.now();timer=setTimeout(()=>{networkTimedOut=true;void disconnect().finally(()=>expire(new OperationError('deadline','Вход Telegram не завершился вовремя','operation')));},Math.max(1,remaining));};
+    const input=async(request:Parameters<SetupUI['input']>[0])=>{pause();try{return await ui.input(request);}finally{arm();}};
+    arm();
+    try{
+      await Promise.race([client.start({
+        phoneNumber:()=>input({message:'Номер Telegram с кодом страны'}),
+        phoneCode:()=>input({message:'Код Telegram',secret:true}),
+        password:()=>input({message:'Пароль Telegram 2FA',secret:true}),
+        onError:error=>fail(error,'Вход в Telegram не завершён. Проверь введённые данные и повтори шаг.'),
+      }),expired]);
+      if(networkTimedOut){await disconnect();throw new OperationError('deadline','Вход Telegram не завершился вовремя','operation');}
+    }finally{pause();}
+    if(remaining<=0){await disconnect();throw new OperationError('deadline','Вход Telegram не завершился вовремя','operation');}
+    const account=client.invoke?await withOperation('connect',budgets.rpc,undefined,async op=>{
+      const users=await telegramInvoke(client as TelegramClient,new Api.users.GetUsers({id:[new Api.InputUserSelf()]}),op);
+      if(!(users[0] instanceof Api.User))throw new SetupIssue('Telegram не вернул владельца');return users[0];
+    }):await telegramDeadline(client.getMe(),budgets.rpc,()=>{void disconnect();});
+    const ownerId=Number(account.id.toString());
     if (!Number.isSafeInteger(ownerId) || ownerId <= 0) throw new SetupIssue('Telegram вернул некорректный ownerId');
     if (expectedOwnerId && expectedOwnerId !== ownerId) {
       throw new SetupIssue('Для другого владельца используй отдельную установку с отдельными data и secrets');
     }
     const dialogs = await ui.task('Получаю группы и каналы Telegram', async (signal?: AbortSignal) => {
       if (signal?.aborted) throw new SetupCancelled();
-      if (!signal) return client!.getDialogs({ limit: undefined });
+      if(client!.invoke)return withOperation('connect',budgets.addChat,signal,async op=>telegramDialogs(client as TelegramClient,op)).catch(error=>{if(signal?.aborted)throw new SetupCancelled();throw error;});
+      if (!signal) return telegramDeadline(client!.getDialogs({ limit: undefined }),budgets.addChat,()=>{void disconnect();});
       let interrupt!: () => void;
       const cancelled = new Promise<never>((_, reject) => {
         interrupt = () => { void disconnect().then(() => reject(new SetupCancelled())); };
       });
       signal.addEventListener('abort', interrupt, { once: true });
       try {
-        const result = await Promise.race([client!.getDialogs({ limit: undefined }), cancelled]);
+        const result = await Promise.race([telegramDeadline(client!.getDialogs({ limit: undefined }),budgets.addChat,()=>{void disconnect();}), cancelled]);
         if (signal.aborted) throw new SetupCancelled();
         return result;
       } catch (error) {

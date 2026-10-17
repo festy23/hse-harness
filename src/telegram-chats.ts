@@ -1,7 +1,9 @@
 import { Api, type TelegramClient } from 'teleproto';
-import { getPeerId } from 'teleproto/Utils.js';
+import { getInputPeer,getPeerId } from 'teleproto/Utils.js';
 import bigInt from 'big-integer';
 import type { TelegramChat } from './config.js';
+import {telegramDialogs,telegramHistoryPage,telegramInvoke} from './telegram-transport.js';
+import {budgets,withOperation,OperationError,type OperationContext} from './operations.js';
 
 type Reference={kind:'id'|'username'|'invite';value:string};
 const username=/^[a-zA-Z][a-zA-Z0-9_]{3,31}$/;
@@ -34,9 +36,10 @@ export function parseTelegramChatReference(input:string):Reference {
 }
 
 /** Resolve and probe existing membership only. This module never joins or sends. */
-export async function resolveTelegramChat(client:TelegramClient,reference:string):Promise<{chat:TelegramChat;peer:Api.TypeInputPeer}> {
+export async function resolveTelegramChat(client:TelegramClient,reference:string,ctx?:OperationContext):Promise<{chat:TelegramChat;peer:Api.TypeInputPeer}> {
+  return withOperation('tool',budgets.addChat,ctx,async op=>{
   const ref=parseTelegramChatReference(reference);
-  const dialogs=await client.getDialogs({limit:undefined});
+  const dialogs=await telegramDialogs(client,op);
   const members=dialogs.flatMap(d=>{
     const e=d.entity;
     return (e instanceof Api.Chat&&!e.left&&!e.deactivated&&!e.migratedTo)||(e instanceof Api.Channel&&!e.left)?[e as Api.Chat|Api.Channel]:[];
@@ -47,14 +50,14 @@ export async function resolveTelegramChat(client:TelegramClient,reference:string
     let entity;
     if(ref.kind==='invite') {
       let result;
-      try {result=await client.invoke(new Api.messages.CheckChatInvite({hash:ref.value}));}
-      catch {throw new Error('Пригласительная ссылка недействительна или недоступна. Передай числовой ID чата');}
+      try {result=await telegramInvoke(client,new Api.messages.CheckChatInvite({hash:ref.value}),op);}
+      catch(error){op.throwIfAborted();if(error instanceof OperationError)throw error;throw new Error('Пригласительная ссылка недействительна или недоступна. Передай числовой ID чата');}
       if(!(result instanceof Api.ChatInviteAlready))throw inaccessible();
       entity=result.chat;
     } else {
       entity=members.find(e=>e instanceof Api.Channel&&(e.username?.toLowerCase()===ref.value||e.usernames?.some(u=>u.active&&u.username.toLowerCase()===ref.value)));
       if(!entity) {
-        try {entity=await client.getEntity('@'+ref.value);}catch{throw new Error('Telegram-чат по этой ссылке не найден; проверь ссылку или передай ID');}
+        try {const result=await telegramInvoke(client,new Api.contacts.ResolveUsername({username:ref.value}),op);entity=result.chats.find(e=>getPeerId(e)===getPeerId(result.peer))??result.users.find(e=>getPeerId(e)===getPeerId(result.peer));}catch{throw new Error('Telegram-чат по этой ссылке не найден; проверь ссылку или передай ID');}
       }
     }
     if(!(entity instanceof Api.Chat||entity instanceof Api.Channel))throw new Error('Источник должен быть группой или каналом, а не личным диалогом');
@@ -64,8 +67,9 @@ export async function resolveTelegramChat(client:TelegramClient,reference:string
   if(matches.length>1)throw new Error('Неоднозначный ID: передай полный Telegram ID с префиксом -100 либо ссылку');
   const entity=matches[0];
   if(!entity)throw inaccessible();
-  const peer=await client.getInputEntity(entity);
-  try {await client.getMessages(peer,{limit:1});}
-  catch {throw new Error('Не удалось прочитать чат. Проверь доступ личного Telegram-аккаунта и повтори попытку');}
+  const peer=getInputPeer(entity);
+  try {await telegramHistoryPage(client,peer,0,1,op);}
+  catch(error){op.throwIfAborted();if(error instanceof OperationError)throw error;throw new Error('Не удалось прочитать чат. Проверь доступ личного Telegram-аккаунта и повтори попытку');}
   return {chat:{id:getPeerId(entity),title:entity.title,allowQuestions:false},peer};
+  });
 }

@@ -61,7 +61,7 @@ test('Google выключен по умолчанию; обе календарн
 test('Фабрика не загружает выключенный Google и проверяет flags до подключения обоих провайдеров',async()=>{
   const loaded:string[]=[];
   const registry={icloud:async(id:string)=>{loaded.push(id);return new Collection('icloud:'+id);},google:async()=>{throw new Error('Google не должен загружаться');}};
-  await createCalendar(calendarSettings({}),registry);assert.equal(loaded.length,2);
+  const lazy=await createCalendar(calendarSettings({}),registry);assert.equal(loaded.length,0,'construction performs no network I/O');await lazy.listTasks();await lazy.lessons('2026-10-01','2026-10-02');assert.equal(loaded.length,2);
   loaded.length=0;
   await assert.rejects(()=>createCalendar({features:{googleCalendar:false,icloudCalendar:true},calendars:{timetable:{provider:'icloud',id:'schedule'},agent:{provider:'google',id:'agent'}}},registry),/Google.*отключен/);
   assert.equal(loaded.length,0);

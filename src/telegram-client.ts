@@ -32,8 +32,8 @@ export async function createTelegramClient(saved:string):Promise<TelegramClient>
   client.setLogLevel(LogLevel.NONE);return client;
 }
 
-export async function telegramDeadline<T>(action:Promise<T>,ms:number):Promise<T> {
+export async function telegramDeadline<T>(action:Promise<T>,ms:number,cancel?:()=>void):Promise<T> {
   let timer:NodeJS.Timeout|undefined;
-  try{return await Promise.race([action,new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('Telegram: подключение не завершилось вовремя; повторю попытку')),ms);})]);}
+  try{return await Promise.race([action,new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>{cancel?.();reject(new Error('Telegram: подключение не завершилось вовремя; повторю попытку'));},ms);})]);}
   finally{clearTimeout(timer);}
 }

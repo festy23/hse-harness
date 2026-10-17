@@ -123,7 +123,7 @@ test('Mail discovery filters non-source folders and logs out after reading metad
     close() { calls.push('close'); },
   });
   assert.deepEqual(choices.map(choice => choice.id), ['INBOX', 'Курсы']);
-  assert.deepEqual(calls, ['connect', 'list', 'logout']);
+  assert.deepEqual(calls, ['connect', 'list', 'logout', 'close']);
 });
 
 test('Mail discovery closes a failed login and a failed logout without losing the original discovery error', async () => {

@@ -1,6 +1,7 @@
 import { secret } from '../../config.js';
 import { SetupCancelled, SetupIssue } from '../errors.js';
 import type { Choice, SetupUI } from '../ports.js';
+import {guardImapClient} from '../../imap-session.js';
 
 interface MailFolder { path: string; specialUse?: string }
 interface MailDiscovery {
@@ -43,7 +44,7 @@ export async function connectMail(ui: SetupUI): Promise<Choice[]> {
       if (signal?.aborted) throw new SetupCancelled();
       const { ImapFlow } = await import('imapflow');
       if (signal?.aborted) throw new SetupCancelled();
-      const client = new ImapFlow({
+      const client = guardImapClient(new ImapFlow({
         host: 'imap.yandex.ru',
         port: 993,
         secure: true,
@@ -51,7 +52,7 @@ export async function connectMail(ui: SetupUI): Promise<Choice[]> {
         connectionTimeout: 20_000,
         socketTimeout: 30_000,
         auth: { user: secret('YANDEX_ADDRESS'), pass: secret('YANDEX_APP_PASSWORD') },
-      });
+      }));
       return mailFolderChoices(client, signal);
     });
   } catch (error) {

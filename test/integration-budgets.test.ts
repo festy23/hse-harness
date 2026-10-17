@@ -240,7 +240,43 @@ test('Telegram setup network budget excludes time spent answering human prompts'
   const root=await mkdtemp(join(tmpdir(),'telegram-auth-budget-')),path=join(root,'session'),oldId=process.env.TELEGRAM_API_ID,oldHash=process.env.TELEGRAM_API_HASH;
   process.env.TELEGRAM_API_ID='123';process.env.TELEGRAM_API_HASH='fixture';await writeFile(path,'previous');
   const client:TelegramSetupClient={async start(parameters){await (parameters.phoneNumber as ()=>Promise<string>)();await pause(2);},async getMe(){return {id:42n};},async getDialogs(){return [];},session:{save:()=> 'replacement'},async disconnect(){}};
-  const ui={note(){},async input(){await pause(35);return 'fixture';},async task(_label:string,run:(signal?:AbortSignal)=>Promise<unknown>){return run();}} as any;
-  try{await setupTelegram(ui,42,{createClient:()=>client,sessionPath:path,networkBudgetMs:20});assert.equal(await readFile(path,'utf8'),'replacement');}
+  const ui={note(){},async input(){await pause(120);return 'fixture';},async task(_label:string,run:(signal?:AbortSignal)=>Promise<unknown>){return run();}} as any;
+  try{await setupTelegram(ui,42,{createClient:()=>client,sessionPath:path,networkBudgetMs:80});assert.equal(await readFile(path,'utf8'),'replacement');}
   finally{oldId===undefined?delete process.env.TELEGRAM_API_ID:process.env.TELEGRAM_API_ID=oldId;oldHash===undefined?delete process.env.TELEGRAM_API_HASH:process.env.TELEGRAM_API_HASH=oldHash;await rm(root,{recursive:true,force:true});}
 });
+
+for(const phase of ['start','lateStartInput','getMe','getDialogs'] as const){
+  test(`Telegram setup joins delayed ${phase} settlement after destroy before returning to rollback`,async()=>{
+    const root=await mkdtemp(join(tmpdir(),'telegram-setup-join-')),path=join(root,'session');
+    const oldId=process.env.TELEGRAM_API_ID,oldHash=process.env.TELEGRAM_API_HASH;
+    process.env.TELEGRAM_API_ID='123';process.env.TELEGRAM_API_HASH='fixture';await writeFile(path,'previous-session');
+    const sdk=deferred<any>(),destroyed=deferred<void>();let sessionSaves=0,returnedToCaller=false,inputCalls=0;
+    const client:TelegramSetupClient={
+      async start(parameters){if(phase==='start')await sdk.promise;if(phase==='lateStartInput'){await sdk.promise;await (parameters.phoneNumber as ()=>Promise<string>)();}},
+      async getMe(){return phase==='getMe'?sdk.promise:{id:42n};},
+      async getDialogs(){return phase==='getDialogs'?sdk.promise:[];},
+      session:{save(){sessionSaves++;return 'must-not-persist';}},
+      async destroy(){destroyed.resolve();},async disconnect(){destroyed.resolve();},
+    };
+    const ui={note(){},async input(){inputCalls++;throw Error('No human prompt expected');},async task(_label:string,run:(signal?:AbortSignal)=>Promise<unknown>){
+      if(phase!=='getDialogs')return run();
+      const controller=new AbortController(),running=run(controller.signal);queueMicrotask(()=>controller.abort());return running;
+    }} as any;
+    // SetupState.transaction awaits this adapter before entering its rollback
+    // catch. This observer must remain pending until the SDK itself has stopped.
+    const outcome=setupTelegram(ui,42,{createClient:()=>client,sessionPath:path,networkBudgetMs:phase==='getDialogs'?1000:15})
+      .then(()=>({ok:true,error:undefined}),error=>({ok:false,error})).finally(()=>{returnedToCaller=true;});
+    try{
+      await destroyed.promise;await new Promise<void>(resolve=>setImmediate(resolve));
+      assert.equal(returnedToCaller,false,'resource disposal alone must not release setup rollback');
+      assert.equal(sessionSaves,0);assert.equal(await readFile(path,'utf8'),'previous-session');
+      if(phase==='lateStartInput')sdk.resolve(undefined);else sdk.reject(Error('Delayed fixture SDK rejection'));
+      const result=await outcome;assert.equal(result.ok,false);assert.equal(inputCalls,0,'a cancelled SDK must not open another human prompt');assert.equal(sessionSaves,0);assert.equal(await readFile(path,'utf8'),'previous-session');
+    }finally{
+      sdk.reject(Error('Fixture cleanup'));await outcome;
+      oldId===undefined?delete process.env.TELEGRAM_API_ID:process.env.TELEGRAM_API_ID=oldId;
+      oldHash===undefined?delete process.env.TELEGRAM_API_HASH:process.env.TELEGRAM_API_HASH=oldHash;
+      await rm(root,{recursive:true,force:true});
+    }
+  });
+}

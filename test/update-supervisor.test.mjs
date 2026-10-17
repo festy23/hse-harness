@@ -202,16 +202,21 @@ test('disable after finish is accepted restores old release instead of leaving t
 });
 
 test('disable during candidate local readiness prevents activation and restores the old release', async () => {
-  await fixture(async ({ home, install, state, events, launch }) => {
-    launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+  await fixture(async ({ home, install, state, events, launch, releases }) => {
+    const entry=join(releases.get('0.3.0').packageRoot,'dist/main.js');
+    const source=await readFile(entry,'utf8');
+    await writeFile(entry,source.replace("setTimeout(() => send(message, 'boot-ready'), options.bootDelay ?? 0);",
+      "const gateTimer=setInterval(()=>{if(existsSync(join(home,version+'.allow-boot'))){clearInterval(gateTimer);send(message,'boot-ready');}},5);"));
+    launch({bootMs:3000}); await eventually(async () => (await state()).runningVersion === '0.2.0');
     await install('0.3.0');
     await eventually(async () => (await events()).some(event => event.type === 'prepare' && event.version === '0.3.0'));
     await atomicJSON(join(home, 'runtime', 'settings.json'), { enabled: false });
+    await writeFile(join(home,'0.3.0.allow-boot'),'ready');
     await eventually(async () => (await state()).updatesEnabled === false && !(await state()).attempt);
     assert.equal((await state()).runningVersion, '0.2.0');
     assert.equal((await events()).some(event => event.type === 'activate' && event.version === '0.3.0'), false);
     assert.deepEqual((await state()).quarantine, []);
-  }, { '0.3.0': { bootDelay: 35 } });
+  });
 });
 
 test('disable during probation returns the confirmed previous writer without discarding candidate changes', async () => {
@@ -523,4 +528,69 @@ test('asynchronous send failure promptly rejects matching waiters and stops the 
   const command=supervisor.command('prepare','boot-ready',1000),rejected=assert.rejects(command,/Worker IPC disconnected/);
   assert.doesNotThrow(()=>callback(Error('IPC write failed')));await rejected;
   assert.equal(supervisor.waiters.size,0);assert.equal(supervisor.stopping,true);assert.deepEqual(signals,['SIGTERM']);
+});
+
+async function activationWithoutAcknowledgement(home,releases,version){
+  await writeFile(join(releases.get(version).packageRoot,'dist/main.js'),`
+import {appendFileSync,writeFileSync,unlinkSync,existsSync} from 'node:fs';
+import {join} from 'node:path';
+const home=process.env.HSE_HARNESS_HOME,version=process.env.HSE_RELEASE_VERSION;
+const writer=join(home,'fixture.writer'),gate=join(home,version+'.operation-settled');
+let context,owned=false,settled=false,draining,mode='inactive';
+const event=type=>appendFileSync(join(home,'fixture.events'),JSON.stringify({type,version,pid:process.pid})+'\\n');
+const send=(message,type)=>{if(process.connected)process.send({...message,type,workerId:process.env.HSE_WORKER_ID,protocolVersion:1});};
+const stop=cause=>{event(owned&&!settled?'operation-aborted':cause);if(owned){unlinkSync(writer);owned=false;}process.exit(0);};
+process.on('SIGTERM',()=>stop('stop'));process.on('disconnect',()=>stop('disconnect'));
+process.on('message',message=>{
+  context=message;
+  if(message.type==='prepare'){event('prepare');send(message,'boot-ready');}
+  if(message.type==='activate'){
+    try{writeFileSync(writer,String(process.pid),{flag:'wx'});owned=true;}catch{event('overlap');process.exit(70);}
+    mode='active';event('accepted-operation'); // Admission opened; the activation ACK is deliberately lost.
+  }
+  if(message.type==='drain'){mode='draining';event('drain');draining=message;if(settled){mode='quiescent';send(message,'quiescent');}}
+  if(message.type==='resume'){draining=undefined;mode='active';event('resume');send(message,'active');}
+  if(message.type==='finish'){event(settled?'finished':'finish-before-settled');stop('finish-exit');}
+});
+setInterval(()=>{
+  if(owned&&!settled&&existsSync(gate)){
+    settled=true;event('operation-settled');
+    if(draining){mode='quiescent';send(draining,'quiescent');draining=undefined;}
+  }
+  if(context)send({...context,mode},'health');
+},10);
+event('spawn');
+`);
+}
+
+test('lost activation ACK cannot SIGTERM or abort an accepted candidate operation during rollback',async()=>{
+  await fixture(async({home,install,state,events,launch,releases})=>{
+    await activationWithoutAcknowledgement(home,releases,'0.3.0');
+    launch({bootMs:250,deferMs:40});await eventually(async()=>(await state()).runningVersion==='0.2.0');
+    await install('0.3.0');
+    await eventually(async()=>(await events()).some(event=>event.version==='0.3.0'&&event.type==='resume'));
+    const pending=await events();
+    assert.equal(pending.some(event=>event.version==='0.3.0'&&['operation-aborted','finished','finish-before-settled'].includes(event.type)),false);
+    assert.equal(pending.filter(event=>event.version==='0.2.0'&&event.type==='activate').length,1,'rollback cannot start another writer while candidate operation is accepted');
+    await writeFile(join(home,'0.3.0.operation-settled'),'ready');
+    await eventually(async()=>(await state()).phase==='rolled-back');
+    const trace=await events(),settled=trace.findIndex(event=>event.version==='0.3.0'&&event.type==='operation-settled'),finished=trace.findIndex(event=>event.version==='0.3.0'&&event.type==='finished');
+    assert.ok(settled>=0&&finished>settled);
+    assert.equal(trace.some(event=>event.type==='overlap'||event.type==='operation-aborted'||event.type==='finish-before-settled'),false);
+    assert.equal((await state()).active.version,'0.2.0');
+  });
+});
+
+test('initial recovery with a lost activation ACK retains the live accepted operation instead of treating it as inactive',async()=>{
+  await fixture(async({home,state,events,launch,releases})=>{
+    await activationWithoutAcknowledgement(home,releases,'0.2.0');
+    const supervisor=launch({bootMs:250});
+    await eventually(async()=>(await state()).phase==='blocked');
+    assert.equal(supervisor.worker.activationRequested,true);assert.equal(supervisor.worker.exited,false);
+    const trace=await events();assert.ok(trace.some(event=>event.type==='resume'));
+    assert.equal(trace.some(event=>['operation-aborted','finished','finish-before-settled'].includes(event.type)),false);
+    assert.ok(JSON.parse(await readFile(join(home,'runtime/supervisor.lock'),'utf8')).ownerId);
+    await writeFile(join(home,'0.2.0.operation-settled'),'ready');
+    await eventually(async()=>(await events()).some(event=>event.type==='operation-settled'));
+  });
 });

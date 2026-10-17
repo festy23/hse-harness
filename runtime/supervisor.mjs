@@ -198,6 +198,9 @@ export class Supervisor {
     if (this.stopping || shouldActivate && !await shouldActivate()) {
       throw Object.assign(new Error('Автоматическое применение отключено во время переключения'), { code: 'UPDATE_CANCELLED' });
     }
+    // An ACK can be lost after the worker has opened root admission. From this
+    // point only proven quiescence permits update-driven teardown.
+    worker.activationRequested = true;
     await this.command('activate', 'active', this.bootMs);
     worker.mode = 'active';
     this.lastHeartbeat = this.clock();
@@ -215,13 +218,24 @@ export class Supervisor {
 
   async stopInactive() {
     const worker = this.worker;
-    if (!worker || worker.exited) return;
-    // No activation was acknowledged: still request normal shutdown first. Never assume active work is safe to kill.
+    if (!worker || worker.exited) return true;
+    if (worker.activationRequested) {
+      if (worker.mode !== 'exiting') {
+        if (worker.mode !== 'quiescent' && !await this.drain()) return false;
+        await this.finishWorker();
+      } else if (!await this.waitExit(worker, this.finishMs)) {
+        this.blocked = true;
+        throw new Error('Не подтверждён выход активированного кандидата; второй worker запрещён');
+      }
+      return true;
+    }
+    // Activation was never requested, so admission could not have opened.
     worker.child.kill('SIGTERM');
     if (!await this.waitExit(worker, this.finishMs)) {
       this.blocked = true;
       throw new Error('Не подтверждён выход кандидата; второй worker запрещён');
     }
+    return true;
   }
 
   async drain() {
@@ -305,7 +319,7 @@ export class Supervisor {
     if (this.worker && !this.worker.exited) {
       if (this.worker.mode === 'active' && !await this.drain()) return;
       if (this.worker.mode === 'quiescent') await this.finishWorker();
-      else if (!this.worker.exited) await this.stopInactive();
+      else if (!this.worker.exited && !await this.stopInactive()) return;
     }
     if (this.stopping) return;
     await this.releaseStore.validate(attempt.from);
@@ -323,7 +337,7 @@ export class Supervisor {
         return;
       } catch (e) {
         attempt.failure = detail(e);
-        await this.stopInactive();
+        if (!await this.stopInactive()) return;
         await sleep((this.options.retryMs ?? [10_000, 30_000, 60_000])[attempt.rollbackStartCount - 1], this.stopController.signal);
       }
     }

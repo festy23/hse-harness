@@ -39,5 +39,5 @@ process.on('message', message => {
     setTimeout(() => { event('finished'); release(); process.exit(0); }, options.finishDelay ?? 0);
   } else if (message.type === 'notice') send(message, 'notice-sent', { id: message.id });
 });
-if (!options.noHealth) setInterval(() => { if (context && (!options.healthGate || existsSync(join(home, version + '.allow-health')))) send(context, 'health', { mode }); }, 10);
+if (!options.noHealth) setInterval(() => { if (context && (!options.healthGate || existsSync(join(home, version + '.allow-health')))) send(context, 'health', { mode }); }, options.healthIntervalMs ?? 10);
 event('spawn');

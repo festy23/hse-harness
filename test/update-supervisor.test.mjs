@@ -260,15 +260,29 @@ test('a busy manual rollback is retried after deferred drain without another own
 
 test('retry of a recovered live heartbeat clears persisted blocked state before a later reboot', async () => {
   await fixture(async ({ home, state, launch }) => {
-    const first = launch({ heartbeatMs: 80 }); await eventually(async () => (await state()).phase === 'blocked');
+    // Control expiry without requiring the real IPC round-trip to beat 80 ms on
+    // a loaded runner. Permission to send health is not evidence of its receipt.
+    let now = 1000;
+    const first = launch({ heartbeatMs: 80, clock: () => now });
+    await eventually(async () => (await state()).runningVersion === '0.2.0');
+    const workerId = first.worker.id;
+    now += 81;
+    await eventually(async () => (await state()).phase === 'blocked');
+    await atomicJSON(join(home, 'runtime', 'settings.json'), { enabled: true, request: { id: 'premature-heartbeat-retry', action: 'retry' } });
+    await eventually(async () => (await state()).lastRequestId === 'premature-heartbeat-retry');
+    assert.equal((await state()).phase, 'blocked', 'retry without a received heartbeat cannot authorize another writer');
+    assert.equal(first.worker.id, workerId);
     await writeFile(join(home, '0.2.0.allow-health'), 'ready');
+    await eventually(() => first.lastHeartbeat === now);
     await atomicJSON(join(home, 'runtime', 'settings.json'), { enabled: true, request: { id: 'live-heartbeat-retry', action: 'retry' } });
     await eventually(async () => (await state()).lastRequestId === 'live-heartbeat-retry');
     assert.notEqual((await state()).phase, 'blocked');
+    assert.equal(first.blocked, false);
+    assert.equal(first.worker.id, workerId);
     first.requestStop(); await first.testCompletion;
     launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
     assert.equal(await readFile(join(home, 'fixture.data'), 'utf8'), '0.2.0\n0.2.0\n');
-  }, { '0.2.0': { healthGate: true } });
+  }, { '0.2.0': { healthGate: true, healthIntervalMs: 250 } });
 });
 
 test('recovery of a persisted user-cancel rollback keeps its no-quarantine policy', async () => {

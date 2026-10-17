@@ -24,7 +24,7 @@ import {MailSource} from ${JSON.stringify(new URL('../src/mail.ts',import.meta.u
 let failed=true,connections=0;ImapFlow.prototype.connect=async function(){connections++;};ImapFlow.prototype.close=function(){};
 ImapFlow.prototype.getMailboxLock=async function(){this.mailbox={uidValidity:7n};return {release(){}};};
 ImapFlow.prototype.search=async()=>[1];ImapFlow.prototype.fetchAll=async()=>[{uid:1,internalDate:new Date('2026-10-16T12:00:00Z'),bodyStructure:{type:'text/plain',part:'1'},envelope:{messageId:'fixture'}}];
-ImapFlow.prototype.download=async function(){const client=this;return {content:Readable.from((async function*(){yield 'partial';if(failed){failed=false;client.emit('error',Error('Socket timeout'));}yield 'complete';})())};};
+ImapFlow.prototype.download=async function(){const client=this;return {content:Readable.from((async function*(){yield 'partial';if(failed){failed=false;await new Promise(resolve=>setImmediate(()=>{client.emit('error',Error('Socket timeout'));resolve();}));}yield 'complete';})())};};
 const store={state:{cursors:{},queue:[]},enqueue:async function(s){this.state.queue.push(s);},save:async()=>{}};
 const source=new MailSource({folders:['INBOX']},store);let rejected=false;try{await source.poll();}catch{rejected=true;}
 if(!rejected||store.state.queue.length||Object.keys(store.state.cursors).length)process.exit(2);

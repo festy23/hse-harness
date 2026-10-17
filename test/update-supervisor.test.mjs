@@ -353,3 +353,174 @@ await supervisor.run().catch(error => { console.error('EXPECTED_JOURNAL_FAILURE'
     }
   });
 });
+
+test('worker crash recovers before a pending preparation completes; only the monitor promotes afterward', async () => {
+  await fixture(async ({ install, state, events, launch, releases, store }) => {
+    let releasePreparation; const gate = new Promise(resolve => { releasePreparation = resolve; }); let prepares = 0;
+    store.prepare = async version => { prepares++; await gate; return releases.get(version); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => prepares === 1);
+    supervisor.worker.child.kill('SIGTERM');
+    await eventually(async () => (await events()).filter(e => e.version === '0.2.0' && e.type === 'activate').length === 2);
+    assert.equal(supervisor.preparation.status, 'pending');
+    assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+    releasePreparation();
+    await eventually(async () => (await state()).active.version === '0.3.0');
+    assert.equal(prepares, 1); assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('disabled preparation settles late without promotion or retry penalty while recovery continues', async () => {
+  await fixture(async ({ home, install, state, events, launch, releases, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; });
+    store.prepare = async (version, options) => { signal = options.signal; await gate; return releases.get(version); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal));
+    await atomicJSON(join(home, 'runtime/settings.json'), { enabled: false });
+    await eventually(() => signal.aborted);
+    supervisor.worker.child.kill('SIGTERM');
+    await eventually(async () => (await events()).filter(e => e.version === '0.2.0' && e.type === 'activate').length === 2);
+    releasePreparation(); await eventually(() => supervisor.preparation === null);
+    assert.equal(supervisor.retryCount, 0); assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('superseding installed version cancels cleanup before another preparation and ignores late success', async () => {
+  await fixture(async ({ install, state, events, launch, releases, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; }); const prepares = [];
+    store.prepare = async (version, options) => { prepares.push(version); if (version === '0.3.0') { signal = options.signal; await gate; } return releases.get(version); };
+    launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal)); await install('0.4.0');
+    await eventually(() => signal.aborted); await wait(40); assert.deepEqual(prepares, ['0.3.0']);
+    releasePreparation(); await eventually(async () => (await state()).active.version === '0.4.0');
+    assert.deepEqual(prepares, ['0.3.0', '0.4.0']);
+    assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('manual rollback waits cancelled preparation cleanup and never promotes its late result', async () => {
+  await fixture(async ({ home, install, state, events, launch, releases, store }) => {
+    launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(async () => (await state()).active.version === '0.3.0' && !(await state()).attempt);
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; });
+    store.prepare = async (version, options) => { signal = options.signal; await gate; return releases.get(version); };
+    await install('0.4.0'); await eventually(() => Boolean(signal));
+    await atomicJSON(join(home, 'runtime/settings.json'), { enabled: true, request: { id: 'rollback-pending-preparation', action: 'rollback' } });
+    await eventually(() => signal.aborted); await wait(40);
+    assert.equal((await state()).lastRequestId, undefined);
+    releasePreparation(); await eventually(async () => (await state()).active.version === '0.2.0' && !(await state()).attempt);
+    assert.equal((await events()).some(e => e.version === '0.4.0'), false);
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('stop retains ownership until cancelled preparation cleanup settles and discards late rejection', async () => {
+  await fixture(async ({ home, install, state, events, launch, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; });
+    store.prepare = async (_version, options) => { signal = options.signal; await gate; throw new Error('late aborted installer failure'); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal));
+    let stopped = false; supervisor.testCompletion.finally(() => { stopped = true; });
+    supervisor.requestStop(); await eventually(() => supervisor.worker.exited); await wait(40);
+    assert.equal(signal.aborted, true); assert.equal(stopped, false);
+    assert.ok(JSON.parse(await readFile(join(home, 'runtime/supervisor.lock'), 'utf8')).ownerId);
+    releasePreparation(); await supervisor.testCompletion;
+    await assert.rejects(readFile(join(home, 'runtime/supervisor.lock')), { code: 'ENOENT' });
+    assert.equal(supervisor.retryCount, 0); assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+  });
+});
+
+test('reboot with a descriptive preparing phase reconstructs work without a phantom pending task', async () => {
+  await fixture(async ({ home, install, state, launch, store, releases }) => {
+    const journal = await state(); journal.phase = 'preparing'; journal.pendingVersion = '0.3.0';
+    await atomicJSON(join(home, 'runtime/state.json'), journal); await install('0.3.0');
+    let prepares = 0; store.prepare = async version => { prepares++; return releases.get(version); };
+    launch(); await eventually(async () => (await state()).active.version === '0.3.0');
+    assert.equal(prepares, 1);
+  });
+});
+
+test('retry cancels a pending preparation and waits its late rejection before a fresh attempt', async () => {
+  await fixture(async ({ home, install, state, events, launch, releases, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; }); let prepares = 0;
+    store.prepare = async (version, options) => { prepares++; if (prepares === 1) { signal = options.signal; await gate; throw new Error('cancelled old attempt'); } return releases.get(version); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal));
+    await atomicJSON(join(home, 'runtime/settings.json'), { enabled: true, request: { id: 'retry-preparation', action: 'retry' } });
+    await eventually(() => signal.aborted); await wait(40); assert.equal(prepares, 1);
+    releasePreparation(); await eventually(async () => (await state()).active.version === '0.3.0');
+    assert.equal(prepares, 2); assert.equal(supervisor.retryCount, 0);
+    assert.equal((await state()).lastRequestId, 'retry-preparation');
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('failed background preparation records one backoff and keeps the owned worker active', async () => {
+  await fixture(async ({ install, state, events, launch, store }) => {
+    let prepares = 0; store.prepare = async () => { prepares++; throw new Error('preparation fixture failed'); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(async () => (await state()).deferredReason === 'preparation fixture failed');
+    await wait(60); assert.equal(prepares, 1); assert.equal(supervisor.retryCount, 1);
+    assert.equal((await state()).runningVersion, '0.2.0');
+    assert.equal((await events()).some(e => e.type === 'drain' || e.version === '0.3.0'), false);
+  });
+});
+
+test('notice acknowledgement save failure enters fatal shutdown and retains ownership until actual worker exit', async () => {
+  await fixture(async ({ home, state, events, launch }) => {
+    const logs=[];const supervisor=launch({finishMs:25,log:message=>logs.push(message)});
+    await eventually(()=>supervisor.worker?.mode==='active');
+    const worker=supervisor.worker,kill=worker.child.kill.bind(worker.child),signals=[];
+    worker.child.kill=signal=>{signals.push(signal);return true;};
+    const save=supervisor.save.bind(supervisor);let armed=true;
+    supervisor.save=async()=>{
+      if(armed&&!(supervisor.state.notices??[]).some(notice=>notice.id==='fatal-ack')){
+        armed=false;throw new Error('Notice acknowledgement durable save failed');
+      }
+      await save();
+    };
+    // Insert the notice before any awaited work so the next acknowledgement is
+    // the isolated failure, rather than a normal empty-journal poll save.
+    supervisor.state.notices=[{id:'fatal-ack',text:'Fixture notice'}];
+    let settled=false;supervisor.testCompletion.then(()=>{settled=true;},()=>{settled=true;});
+    try{
+      await save();supervisor.deliverNotices();
+      await eventually(()=>logs.some(message=>message.includes('Fatal supervisor failure')));
+      assert.equal(supervisor.stopping,true);assert.equal(worker.exited,false);assert.equal(settled,false);
+      assert.deepEqual(signals,['SIGTERM']);
+      assert.ok(JSON.parse(await readFile(join(home,'runtime/supervisor.lock'),'utf8')).ownerId);
+      kill('SIGTERM');
+      await assert.rejects(supervisor.testCompletion,/Notice acknowledgement durable save failed/);
+      await assert.rejects(readFile(join(home,'runtime/supervisor.lock')),{code:'ENOENT'});
+      assert.equal((await events()).some(event=>event.type==='stop'&&event.cause==='SIGTERM'),true);
+      assert.equal((await state()).runningVersion,'0.2.0','failed supervisor never claims an unconfirmed clean exit in the journal');
+    }finally{worker.child.kill=kill;if(!worker.exited)kill('SIGTERM');}
+  });
+});
+
+test('synchronous child send failure rejects its command and requests graceful shutdown without throwing from IPC delivery', async () => {
+  const signals=[];const supervisor=new Supervisor('/unused-send-fixture');
+  supervisor.worker={id:'worker',attemptId:'attempt',exited:false,child:{connected:true,send(){throw Error('IPC channel race');},kill(signal){signals.push(signal);}}};
+  await assert.rejects(supervisor.command('prepare','boot-ready',1000),/Worker IPC disconnected/);
+  assert.equal(supervisor.waiters.size,0);assert.equal(supervisor.stopping,true);
+  assert.match(supervisor.backgroundFailure.message,/Worker IPC disconnected/);assert.deepEqual(signals,['SIGTERM']);
+});
+
+test('asynchronous child send failure belongs to its captured worker and cannot stop a later incarnation', async () => {
+  const supervisor=new Supervisor('/unused-send-fixture');let callback;const signals=[];
+  const old={id:'old',attemptId:'attempt',exited:false,child:{connected:true,send(_message,done){callback=done;},kill(signal){signals.push(['old',signal]);}}};
+  supervisor.worker=old;supervisor.send('notice',{id:'fixture',text:'Fixture'});
+  supervisor.worker={id:'new',attemptId:'new-attempt',exited:false,child:{connected:true,kill(signal){signals.push(['new',signal]);}}};
+  assert.doesNotThrow(()=>callback(Error('Late IPC failure')));
+  assert.equal(supervisor.stopping,false);assert.equal(supervisor.backgroundFailure,null);assert.deepEqual(signals,[]);
+});
+
+test('asynchronous send failure promptly rejects matching waiters and stops the current worker gracefully', async () => {
+  const supervisor=new Supervisor('/unused-send-fixture');let callback;const signals=[];
+  supervisor.worker={id:'worker',attemptId:'attempt',exited:false,child:{connected:true,send(_message,done){callback=done;},kill(signal){signals.push(signal);}}};
+  const command=supervisor.command('prepare','boot-ready',1000),rejected=assert.rejects(command,/Worker IPC disconnected/);
+  assert.doesNotThrow(()=>callback(Error('IPC write failed')));await rejected;
+  assert.equal(supervisor.waiters.size,0);assert.equal(supervisor.stopping,true);assert.deepEqual(signals,['SIGTERM']);
+});

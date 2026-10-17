@@ -6,7 +6,7 @@ export const PACKAGE_NAME = '@ivan-boss/hse-harness';
 export const PROTOCOL_VERSION = 1;
 export const STATE_SCHEMA_VERSION = 2;
 export const PI_VERSION = '1.0.2';
-export const SUPERVISOR_VERSION = '1.0.0';
+export const SUPERVISOR_VERSION = '1.0.1';
 export const ESBUILD_POLICY = Object.freeze({
   version: '0.28.2',
   scriptSha256: '612294e278914443bdcf81cb17f54afec34dbdd2ebd999a6ee187912320cc315',
@@ -19,6 +19,12 @@ export const ESBUILD_POLICY = Object.freeze({
 });
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export const stableVersion = value => typeof value === 'string' && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
+function supportedSupervisor(minimum) {
+  if (!stableVersion(minimum)) return false;
+  const wanted = minimum.split('.').map(BigInt), current = SUPERVISOR_VERSION.split('.').map(BigInt);
+  for (let i = 0; i < 3; i++) if (wanted[i] !== current[i]) return wanted[i] < current[i];
+  return true;
+}
 
 export function validateRelativePath(path) {
   if (typeof path !== 'string' || !path || path.includes('\\') || isAbsolute(path) || path.split('/').some(p => !p || p === '..' || p === '.') || path.includes('\0')) throw new Error('invalid inventory path');
@@ -83,7 +89,7 @@ export async function verifyInventory(root, inventory, { exact = false } = {}) {
 
 export function assertManifest(manifest, version, { platform = process.platform, arch = process.arch, nodeVersion = process.versions.node } = {}) {
   if (!manifest || manifest.format !== 1 || manifest.packageName !== PACKAGE_NAME || manifest.version !== version || !stableVersion(version)) throw new Error('invalid release manifest identity');
-  if (manifest.protocolVersion !== PROTOCOL_VERSION || manifest.minSupervisorVersion !== SUPERVISOR_VERSION || manifest.stateSchemaVersion !== STATE_SCHEMA_VERSION || manifest.piVersion !== PI_VERSION) throw new Error('incompatible release protocol or state schema');
+  if (manifest.protocolVersion !== PROTOCOL_VERSION || !supportedSupervisor(manifest.minSupervisorVersion) || manifest.stateSchemaVersion !== STATE_SCHEMA_VERSION || manifest.piVersion !== PI_VERSION) throw new Error('incompatible release protocol or state schema');
   const expectedFormats = { operations: 2, approvals: 1, calendar: 1, auth: 1, pi: PI_VERSION };
   if (manifest.writableStateVersion !== 2 || !manifest.readableStateVersions?.includes(1) || !manifest.readableStateVersions?.includes(2)) throw new Error('incompatible state read/write policy');
   if (!manifest.formats || Object.entries(expectedFormats).some(([key, value]) => manifest.formats[key] !== value)) throw new Error('incompatible persisted data formats');

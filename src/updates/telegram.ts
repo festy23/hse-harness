@@ -1,3 +1,4 @@
+import type {OperationContext} from '../operations.js';
 import {randomUUID} from 'node:crypto';
 import type {Store,NpmUpdateState} from '../store.js';
 import type {TelegramBot,BotUpdate} from '../bot.js';
@@ -10,63 +11,65 @@ const active=(q:NpmUpdateState['request'])=>q&&['authorizing','pending','install
 export class TelegramUpdates {
   private busy=false;
   constructor(private readonly store:Store,private readonly bot:Pick<TelegramBot,'identity'|'send'|'isOwner'>,private readonly runtime:UpdateRuntime,
-    private readonly workerId:string,private readonly signal:AbortSignal,private readonly latest:()=>Promise<AvailableRelease>=latestRelease,private readonly now:()=>number=Date.now) {}
+    private readonly workerId:string,private readonly signal:AbortSignal,private readonly latest:(ctx?:OperationContext)=>Promise<AvailableRelease>=ctx=>latestRelease(fetch,ctx),private readonly now:()=>number=Date.now) {}
   private state():NpmUpdateState {
     const state=this.store.state.npmUpdates??={};
     if(state.botIdentity!==this.bot.identity){state.botIdentity=this.bot.identity;delete state.offer;delete state.lastOfferedAt;delete state.pendingNotice;}
     return state;
   }
   private buttons(id:string){return [[{text:'Обновить',callback_data:`hse_update:${id}`}]];}
-  private async send(text:string,buttons?:ReturnType<TelegramUpdates['buttons']>,id?:string):Promise<boolean>{
-    try{await this.bot.send(text,buttons,id);return true;}
+  private async send(text:string,buttons?:ReturnType<TelegramUpdates['buttons']>,id?:string,ctx?:OperationContext):Promise<boolean>{
+    try{await this.bot.send(text,buttons,id,ctx);return true;}
     catch{await this.store.flush();return false;}
   }
-  private async pending(snapshot:UpdateSnapshot):Promise<void>{
+  private async pending(snapshot:UpdateSnapshot,ctx?:OperationContext):Promise<void>{
     const state=this.state(),notice=state.pendingNotice;if(!notice)return;
     if(compareVersions(snapshot.runningVersion,notice.version)>=0){delete state.pendingNotice;await this.store.save();return;}
-    if(await this.send(notice.text,this.buttons(notice.offerId),notice.id)){delete state.pendingNotice;await this.store.save();}
+    if(await this.send(notice.text,this.buttons(notice.offerId),notice.id,ctx)){delete state.pendingNotice;await this.store.save();}
   }
-  private async offer(snapshot:UpdateSnapshot,manual=false,delivery?:string){
+  private async offer(snapshot:UpdateSnapshot,manual=false,delivery?:string,ctx?:OperationContext){
     const state=this.state(),release=state.latest;
-    if(!release||compareVersions(release.version,snapshot.runningVersion)<=0){if(manual)await this.bot.send(`Работающая версия: ${snapshot.runningVersion}. Новых доступных версий нет.`,undefined,delivery);return;}
+    if(!release||compareVersions(release.version,snapshot.runningVersion)<=0){if(manual)await this.bot.send(`Работающая версия: ${snapshot.runningVersion}. Новых доступных версий нет.`,undefined,delivery,ctx);return;}
     if(!manual&&state.lastOfferedAt!==undefined&&this.now()-state.lastOfferedAt<DAY)return;
     if(state.offer?.version!==release.version||state.offer.integrity!==release.integrity)state.offer={...release,id:randomUUID()};
     await this.store.save();
     const id=state.offer!.id;
     const text=`Доступна новая версия HSE HARNESS: ${snapshot.runningVersion} → ${release.version}.\nНажми «Обновить», чтобы установить её. Память и очередь сохранятся.${snapshot.updatesEnabled?'':'\nПрименение будет разрешено только для этого обновления; прежняя настройка затем восстановится.'}`;
     state.pendingNotice={id:delivery??`npm-offer:${state.botIdentity}:${randomUUID()}`,text,offerId:id,version:release.version};
-    state.lastOfferedAt=this.now();await this.store.save();await this.pending(snapshot);
+    state.lastOfferedAt=this.now();await this.store.save();await this.pending(snapshot,ctx);
   }
-  async checkManually(update:BotUpdate):Promise<void> {
+  async checkManually(update:BotUpdate,ctx?:OperationContext):Promise<void> {
     if(!this.bot.isOwner(update))return;
+    const reply=(text:string)=>this.bot.send(text,undefined,`npm-command:${this.bot.identity}:${update.update_id}`,ctx);
     const snapshot=await this.runtime.snapshot();
-    if(!snapshot){await this.bot.send('Обновление из Telegram доступно при постоянном запуске установленного npm-пакета.');return;}
+    if(!snapshot){await reply('Обновление из Telegram доступно при постоянном запуске установленного npm-пакета.');return;}
     const state=this.state();
-    if(active(state.request)){await this.bot.send(`Обновление до ${state.request!.version} уже выполняется. /status — состояние.`);return;}
+    if(active(state.request)){await reply(`Обновление до ${state.request!.version} уже выполняется. /status — состояние.`);return;}
     let release;
-    try{release=await this.latest();}
-    catch{await this.bot.send('Не удалось проверить npm. Попробуй /updates позже.');return;}
-    if(active(state.request)){await this.send(`Обновление до ${state.request!.version} уже выполняется.`);return;}
+    try{release=await this.latest(ctx);}
+    catch{await reply('Не удалось проверить npm. Попробуй /updates позже.');return;}
+    if(active(state.request)){await reply(`Обновление до ${state.request!.version} уже выполняется.`);return;}
     state.latest=release;state.checkedAt=this.now();await this.store.save();
-    await this.offer(snapshot,true,`npm-manual:${this.bot.identity}:${update.update_id}`);
+    await this.offer(snapshot,true,`npm-manual:${this.bot.identity}:${update.update_id}`,ctx);
   }
-  async callback(update:BotUpdate):Promise<boolean> {
+  async callback(update:BotUpdate,ctx?:OperationContext):Promise<boolean> {
     const data=update.callback_query?.data;
     if(!data?.startsWith('hse_update:'))return false;
     if(!this.bot.isOwner(update))return true;
+    const reply=(text:string)=>this.bot.send(text,undefined,`npm-callback:${this.bot.identity}:${update.update_id}`,ctx);
     const state=this.state(),offer=state.offer;
-    if(!offer||data!==`hse_update:${offer.id}`){await this.bot.send('Эта кнопка устарела. Проверь новую версию через /updates.');return true;}
+    if(!offer||data!==`hse_update:${offer.id}`){await reply('Эта кнопка устарела. Проверь новую версию через /updates.');return true;}
     const snapshot=await this.runtime.snapshot();if(!snapshot)return true;
-    if(compareVersions(snapshot.runningVersion,offer.version)>=0){await this.bot.send(`Уже работает версия ${snapshot.runningVersion}.`);return true;}
-    if(active(state.request)){await this.bot.send(`Обновление до ${state.request!.version} уже выполняется.`);return true;}
+    if(compareVersions(snapshot.runningVersion,offer.version)>=0){await reply(`Уже работает версия ${snapshot.runningVersion}.`);return true;}
+    if(active(state.request)){await reply(`Обновление до ${state.request!.version} уже выполняется.`);return true;}
     let latest;
-    try{latest=await this.latest();}catch{await this.bot.send('Не удалось проверить выбранную версию в npm. Попробуй позже.');return true;}
-    if(active(state.request)){await this.bot.send(`Обновление до ${state.request!.version} уже выполняется.`);return true;}
-    if(latest.version!==offer.version||latest.integrity!==offer.integrity){state.latest=latest;await this.store.save();await this.offer(snapshot,true);return true;}
+    try{latest=await this.latest(ctx);}catch{await reply('Не удалось проверить выбранную версию в npm. Попробуй позже.');return true;}
+    if(active(state.request)){await reply(`Обновление до ${state.request!.version} уже выполняется.`);return true;}
+    if(latest.version!==offer.version||latest.integrity!==offer.integrity){state.latest=latest;await this.store.save();await this.offer(snapshot,true,undefined,ctx);return true;}
     state.request={...offer,id:randomUUID(),workerId:this.workerId,phase:'authorizing',created:this.now()};await this.store.save();
     await this.runtime.grant(state.request.id);
     state.request.phase='pending';await this.store.save();
-    await this.send(`Запускаю обновление до ${offer.version}. Это может занять несколько минут; сообщу после переключения.`,undefined,`npm-start:${state.request.id}`);
+    await this.send(`Запускаю обновление до ${offer.version}. Это может занять несколько минут; сообщу после переключения.`,undefined,`npm-start:${state.request.id}`,ctx);
     return true;
   }
   async tick():Promise<void> {

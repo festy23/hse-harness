@@ -1,3 +1,4 @@
+import {withOperation,type OperationContext} from '../operations.js';
 export const PACKAGE_NAME='@ivan-boss/hse-harness';
 export interface AvailableRelease {version:string;integrity:string}
 export const stableVersion=(value:unknown):value is string=>typeof value==='string'&&value.length<=64&&/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
@@ -6,8 +7,9 @@ export function compareVersions(a:string,b:string):number {
   const x=a.split('.').map(BigInt),y=b.split('.').map(BigInt);
   for(let i=0;i<3;i++){if(x[i]!>y[i]!)return 1;if(x[i]!<y[i]!)return -1;}return 0;
 }
-export async function latestRelease(request:typeof fetch=fetch):Promise<AvailableRelease> {
-  const response=await request('https://registry.npmjs.org/%40ivan-boss%2Fhse-harness',{signal:AbortSignal.timeout(15000),redirect:'error'});
+export async function latestRelease(request:typeof fetch=fetch,ctx?:OperationContext):Promise<AvailableRelease> {
+  return withOperation('request',15000,ctx,async op=>{
+  const response=await request('https://registry.npmjs.org/%40ivan-boss%2Fhse-harness',{signal:op.signal,redirect:'error'});
   if(!response.ok)throw new Error('Реестр npm временно недоступен');
   const text=await response.text();if(text.length>2_000_000)throw new Error('Слишком большой ответ npm');
   const metadata=JSON.parse(text),version=metadata?.['dist-tags']?.latest;
@@ -17,4 +19,5 @@ export async function latestRelease(request:typeof fetch=fetch):Promise<Availabl
   const url=new URL(pkg.dist.tarball);
   if(url.protocol!=='https:'||url.hostname!=='registry.npmjs.org'||url.username||url.password||url.port)throw new Error('Архив обновления вне официального реестра');
   return {version,integrity};
+  });
 }

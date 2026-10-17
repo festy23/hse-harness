@@ -144,7 +144,9 @@ test('inaccessible chat and failed durable save never activate or enqueue a sour
 
 test('config additions serialize and stale CLI cannot overwrite a dynamically added chat',()=>fixture(async(_source,_wire,_store,path,config)=>{
   const cli=new SetupState(join(path,'..'),path+'.env',path);await cli.load();
-  await Promise.all([saveTelegramChat(path,{id:canonical,title:'A',allowQuestions:false},42),saveTelegramChat(path,{id:'-4321',title:'B',allowQuestions:false},42),saveTelegramChat(path,{id:canonical,title:'Duplicate'},42)]);
+  // Concurrent lock acquisition is not FIFO; every verified source candidate
+  // carries the same read-only policy, whichever duplicate reaches disk first.
+  await Promise.all([saveTelegramChat(path,{id:canonical,title:'A',allowQuestions:false},42),saveTelegramChat(path,{id:'-4321',title:'B',allowQuestions:false},42),saveTelegramChat(path,{id:canonical,title:'Duplicate',allowQuestions:false},42)]);
   const saved=JSON.parse(await readFile(path,'utf8'));assert.equal(saved.chats.length,2);assert.equal(saved.chats.find((c:any)=>c.id===canonical).allowQuestions,false);
   cli.config.model='stale';await assert.rejects(cli.save(),/другом окне/);assert.equal(JSON.parse(await readFile(path,'utf8')).model,config.model);
 }));

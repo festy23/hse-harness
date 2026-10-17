@@ -2,6 +2,17 @@ import { mkdir, readFile, rename, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hash, validateTask, type Job, type Source, type Task } from './domain.js';
+import {stableVersion,type AvailableRelease} from './updates/releases.js';
+
+export interface NpmUpdateState {
+  botIdentity?:string;
+  checkedAt?:number;
+  lastOfferedAt?:number;
+  latest?:AvailableRelease;
+  offer?:AvailableRelease&{id:string};
+  pendingNotice?:{id:string;text:string;offerId:string;version:string};
+  request?:AvailableRelease&{id:string;workerId:string;phase:'authorizing'|'pending'|'installing'|'awaiting-apply'|'completed'|'failed';created:number};
+}
 
 export interface TaskOperation {
   id:string;
@@ -27,6 +38,7 @@ export interface Approval {
   notified?: boolean;
 }
 export interface State {
+  npmUpdates?:NpmUpdateState;
   schemaVersion: 2;
   sessionPath?: string;
   botOffset: number;
@@ -59,6 +71,16 @@ export class Store {
       const raw: unknown = JSON.parse(await readFile(join(this.dir,'operations.json'),'utf8'));
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid operations state');
       const s = raw as Partial<State>;
+      const update=s.npmUpdates;
+      if(update!==undefined){
+        if(!update||typeof update!=='object')throw new Error('Invalid npm update state');
+        for(const field of ['checkedAt','lastOfferedAt'] as const)if(update[field]!==undefined&&!Number.isFinite(update[field]))throw new Error('Invalid update timestamp');
+        if(update.botIdentity!==undefined&&typeof update.botIdentity!=='string')throw new Error('Invalid update bot identity');
+        if(update.pendingNotice&&(!update.pendingNotice||typeof update.pendingNotice.id!=='string'||typeof update.pendingNotice.text!=='string'||!stableVersion(update.pendingNotice.version)||typeof update.pendingNotice.offerId!=='string'))throw new Error('Invalid update notification');
+        for(const item of [update.latest,update.offer,update.request])if(item!==undefined&&(!item||!stableVersion(item.version)||typeof item.integrity!=='string'||!/^sha512-[A-Za-z0-9+/]{86}==$/.test(item.integrity)))throw new Error('Invalid update release');
+        for(const item of [update.offer,update.request])if(item!==undefined&&!/^[a-f0-9-]{36}$/.test(item.id))throw new Error('Invalid update nonce');
+        if(update.request&&(!['authorizing','pending','installing','awaiting-apply','completed','failed'].includes(update.request.phase)||typeof update.request.workerId!=='string'||!Number.isFinite(update.request.created)))throw new Error('Invalid update request');
+      }
       const version=(raw as {schemaVersion?:number}).schemaVersion;
       if (version !== undefined && ![1,2].includes(version)) throw new Error('Unsupported operations format');
       if (!Number.isSafeInteger(s.botOffset) || s.botOffset! < 0 || !Array.isArray(s.queue) || !Array.isArray(s.jobs) || !Array.isArray(s.approvals)) throw new Error('Invalid operations state');
@@ -136,9 +158,9 @@ export async function writeSecret(path: string, content: string): Promise<void> 
   await rename(temp,path);
 }
 
-export async function processLock(dir: string): Promise<() => Promise<void>> {
+export async function processLock(dir: string, filename = 'service.lock'): Promise<() => Promise<void>> {
   await mkdir(dir,{recursive:true,mode:0o700});
-  const path = join(dir,'service.lock');
+  const path = join(dir,filename);
   const identity = JSON.stringify({pid:process.pid,nonce:randomUUID(),workerId:process.env.HSE_WORKER_ID,startedAt:new Date().toISOString()});
   for(let attempt=0;attempt<2;attempt++) {
     let handle;
@@ -152,7 +174,7 @@ export async function processLock(dir: string): Promise<() => Promise<void>> {
     // no recovery guard to strand. An interrupted recovery remains blocked.
     const recoveryPath=path+'.recovery';let guard;
     try{guard=await open(recoveryPath,'wx',0o600);}
-    catch(error){if((error as NodeJS.ErrnoException).code==='EEXIST')throw new Error('Writer lock recovery interrupted or in progress; inspect service.lock.recovery');throw error;}
+    catch(error){if((error as NodeJS.ErrnoException).code==='EEXIST')throw new Error(`Writer lock recovery interrupted or in progress; inspect ${filename}.recovery`);throw error;}
     try{
       const previous=await readFile(path,'utf8');let pid:number;
       try{const value:unknown=JSON.parse(previous);pid=typeof value==='number'?value:Number((value as {pid?:number})?.pid);}

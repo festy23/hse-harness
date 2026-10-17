@@ -63,7 +63,9 @@ export function studyTools(d:{calendar:Calendar;approvals:Approvals;bot:Notifier
       if(!d.store.state.delivered[key]){await d.bot.send(a.text,undefined,key);d.store.state.delivered[key]=Date.now();await d.store.save();}
       return {sent:true};
     }),
-    tool('read_chat_history','Контекст только разрешенного чата, включая исходные авторов/ответы.',Type.Object({chat:Type.String(),limit:Type.Integer({minimum:1,maximum:100})}),async a=>d.telegram.history(a.chat,a.limit)),
+    tool('list_telegram_chats','Подключённые учебные чаты: канонический ID, название, доступ для вопросов и состояние загрузки истории.',Type.Object({}),async()=>d.telegram.listChats()),
+    tool('add_telegram_chat','Подключи учебную группу/канал по ссылке t.me, @username или ID. Личный аккаунт должен уже состоять в нём. Сохраняет источник без перезапуска, только для чтения; история ставится в очередь следующим циклом.',Type.Object({reference:Type.String({minLength:1,maxLength:500})}),async a=>d.telegram.addChat(a.reference)),
+    tool('read_chat_history','Контекст подключённого чата, включая исходные авторов/ответы. Если чат не подключён, сначала add_telegram_chat.',Type.Object({chat:Type.String(),limit:Type.Integer({minimum:1,maximum:100})}),async a=>d.telegram.history(a.chat,a.limit)),
     tool('search_history','Поиск по оригинальным записям штатной Pi-сессии, сохраненным до compaction.',Type.Object({query:Type.String({minLength:2,maxLength:150})}),async a=>d.pi.search(a.query)),
     tool('read_hse','Читай официальную текстовую страницу hse.ru. При nextOffset дочитай страницу с этим offset; иначе можно пропустить формулу. Возвращает ссылки каталога/предметов.',Type.Object({url:Type.String(),offset:Type.Optional(Type.Integer({minimum:0,maximum:1_000_000}))}),async a=>readHse(a.url,a.offset)),
   ];

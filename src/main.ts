@@ -12,7 +12,10 @@ import { PiAssistant } from './pi.js';
 import { Approvals } from './approvals.js';
 import { Scheduler } from './scheduler.js';
 import { studyTools } from './tools.js';
-import { prettyTime } from './domain.js';
+import { prettyTime, type Task } from './domain.js';
+import {TelegramUpdates} from './updates/telegram.js';
+import {updateRuntime} from './updates/runtime.js';
+import {botHelp} from './bot-commands.js';
 
 async function main():Promise<void> {
   const managed=Boolean(process.env.HSE_WORKER_ID && process.send);
@@ -37,6 +40,8 @@ async function main():Promise<void> {
     throw error;
   }
   const bot=new TelegramBot(config.ownerId,store);
+  const updateAbort=new AbortController();
+  const updates=new TelegramUpdates(store,bot,updateRuntime(process.env.HSE_HARNESS_HOME,managed),process.env.HSE_WORKER_ID??'direct',updateAbort.signal);
   let calendar:StudyCalendar;
   const scheduler=new Scheduler(store,bot);const pi=new PiAssistant();
   let stopped=false,sourceReady=false,ready=false,fatalExit=false;
@@ -66,19 +71,19 @@ async function main():Promise<void> {
   };
   let approvals:Approvals;
   const telegram=new TelegramSource(config,store,(chat,id)=>approvals.reply(chat,id),text=>bot.send(text),()=>lifecycle.accepting);
-  approvals=new Approvals(store,bot,{question:(chat,text,id)=>telegram.question(chat,text,id),lesson:(id,start,end)=>calendar.changeLesson(id,start,end),previewLesson:id=>calendar.lessonPreview(id),lessonMatches:(id,start,end)=>calendar.lessonMatches(id,start,end)},new Set(config.chats.map(c=>c.id)));
+  approvals=new Approvals(store,bot,{question:(chat,text,id)=>telegram.question(chat,text,id),lesson:(id,start,end)=>calendar.changeLesson(id,start,end),previewLesson:id=>calendar.lessonPreview(id),lessonMatches:(id,start,end)=>calendar.lessonMatches(id,start,end)},new Set(config.chats.filter(c=>c.allowQuestions!==false).map(c=>c.id)));
   const mail=new MailSource(config,store,()=>lifecycle.accepting);
-  const stop=()=>{stopped=true;lifecycle.stop();activate();polling?.abort();pi.session?.abort().catch(()=>{});};
+  const stop=()=>{stopped=true;updateAbort.abort();lifecycle.stop();activate();polling?.abort();pi.session?.abort().catch(()=>{});};
   process.once('SIGINT',stop);process.once('SIGTERM',stop);if(managed)process.once('disconnect',stop);
   try {
     const runtimeStatus=async()=>{
       if(!process.env.HSE_HARNESS_HOME)return undefined;
       try{
         const runtime=JSON.parse(await readFile(join(process.env.HSE_HARNESS_HOME,'runtime','state.json'),'utf8'));
-        return {installedVersion:runtime.lastObservedVersion,runningVersion:process.env.HSE_RELEASE_VERSION??runtime.active?.version,
+        return {installedVersion:runtime.installedVersion,runningVersion:process.env.HSE_RELEASE_VERSION??runtime.active?.version,
           supervisorVersion:runtime.supervisorVersion,updatesEnabled:runtime.updatesEnabled,phase:runtime.attempt?.phase??runtime.phase,
           pendingVersion:runtime.attempt?.to?.version,lastSuccessfulSwitch:runtime.lastSuccessfulSwitch,deferredReason:runtime.deferredReason,
-          failure:runtime.attempt?.failure};
+          failure:runtime.attempt?.failure,availableVersion:store.state.npmUpdates?.latest?.version,requestedVersion:store.state.npmUpdates?.request?.version,requestState:store.state.npmUpdates?.request?.phase};
       }catch{return undefined;}
     };
     const handle=async(u:BotUpdate)=>{
@@ -87,6 +92,7 @@ async function main():Promise<void> {
       if(u.callback_query) {
         const data=u.callback_query.data??'';
         await bot.ack(u.callback_query.id).catch(()=>{});
+        if(await updates.callback(u))return;
         if(!ready){await bot.send('Подключения еще не готовы. Черновик сохранен; повтори подтверждение после завершения запуска. /status — состояние.');return;}
         const [action,id]=data.split(':');
         if(id && ['approve','reject'].includes(action!)) {
@@ -95,17 +101,25 @@ async function main():Promise<void> {
         return;
       }
       const text=u.message?.text;if(!text)return;
+      if(text==='/help'){await bot.send(botHelp,undefined,`help:${bot.identity}:${u.update_id}`);return;}
+      if(text==='/updates'){await updates.checkManually(u);return;}
       if(text==='/status') {await bot.send(JSON.stringify({health:store.state.health,starting:!ready,calendars:config.calendars,queued:store.state.queue.length,remindersEnabled:store.state.bootstrapFinished,missedDigests:store.state.missedDigests,updates:await runtimeStatus(),subscriptionRemaining:'достоверный остаток пока недоступен'},null,2));return;}
       if(text==='/tasks') {
         if(!ready){await bot.send('Подключения еще не готовы; список работ пока недоступен. /status — состояние.');return;}
-        const tasks=await calendar.listTasks();
+        let tasks:Task[];
+        try{tasks=await calendar.listTasks();}
+        catch(error){
+          await status('Календарь',error);
+          await bot.send('Календарь сейчас недоступен, поэтому список работ получить не удалось. Попробуй /tasks позже; другие сообщения принимаю.');
+          return;
+        }
         await bot.send(tasks.map(t=>`${t.id}: ${t.course} — ${t.title}\n${t.deadline?prettyTime(t.deadline):'Без срока'}; ${t.status}`).join('\n\n')||'В календаре пока нет работ. Задания без срока доступны в диалоге агента.');return;
       }
       if(text==='/ready') {
         if(!sourceReady||store.state.queue.length) {await bot.send('Обработка источников или твоих отметок еще идет. Дождись завершения сверки.');return;}
         store.state.bootstrapFinished=true;await store.save();await bot.send('Напоминания включены. Сообщай «сделал <задание>» и «сдал <задание>».');return;
       }
-      if(text==='/start') {await bot.send('Это основной личный диалог с твоим учебным помощником. Я принимаю команды и информацию только от твоего аккаунта; ответы, сводки и напоминания приходят от этого бота.\n\nПиши вопросы, присылай текст заданий и сообщай «сделал …» или «сдал …». /tasks — работы, /status — подключения, /ready — включить напоминания после первоначальной сверки.'+(!ready?'\n\nПодключения еще настраиваются. Твои сообщения сохраню в очереди; /status покажет состояние.':''));return;}
+      if(text==='/start') {await bot.send('Это основной личный диалог с твоим учебным помощником. Ответы, сводки и напоминания приходят от этого бота.\n\n'+botHelp+(!ready?'\n\nПодключения еще настраиваются. Твои сообщения сохраню в очереди; /status покажет состояние.':''));return;}
       await store.enqueueOwner(text,u.update_id);
       if(!ready)await bot.send('Сообщение сохранено в очереди. Подключения еще не готовы; отвечу после восстановления. /status — состояние.');
     };
@@ -118,7 +132,13 @@ async function main():Promise<void> {
             polling=new AbortController();const updates=await bot.updates(store.state.botOffset,polling.signal);
             for(const u of updates){if(!lifecycle.accepting)break;await handle(u);store.state.botOffset=Math.max(store.state.botOffset,u.update_id+1);await store.save();}
             if(lifecycle.accepting)await status('Бот');
-          }catch {if(lifecycle.accepting)await status('Бот',new Error());}
+          }catch(error){
+            if(lifecycle.accepting){
+              const detail=error instanceof Error?`${error.name}: ${error.message.replace(/https?:\/\/\S+/g,'[URL]')}`:'Неизвестная ошибка';
+              console.error(`${new Date().toISOString()} Telegram polling/command failed: ${detail}`);
+              await status('Бот',error);
+            }
+          }
           finally{polling=undefined;}
         });
         if(!stopped)await lifecycle.sleep(3000);
@@ -191,6 +211,13 @@ async function main():Promise<void> {
         if(!stopped)await lifecycle.sleep(10_000);
       }
     };
+    const updateChecks=async()=>{
+      while(!stopped){
+        await lifecycle.waitActive();if(stopped)break;
+        await lifecycle.run(()=>updates.tick());
+        if(!stopped)await lifecycle.sleep(5000);
+      }
+    };
     const initialize=async()=>{
       while(!stopped&&!ready){
         await lifecycle.waitActive();if(stopped)break;
@@ -205,7 +232,7 @@ async function main():Promise<void> {
           // Calendar reads can time out after successful discovery. Let the private
           // dialogue run; source/timer loops report and retry reads independently.
           component='Уведомления/календарь';await approvals.recover();
-          await bot.send('Учебный помощник запущен. /tasks — работы, /status — подключения. После первоначальной сверки используй /ready для запуска напоминаний.');
+          await bot.send('Учебный помощник запущен. /help — все команды, /tasks — работы, /status — подключения. После первоначальной сверки используй /ready для запуска напоминаний.');
           ready=true;
         }catch(e){
           pi.dispose();await telegram.close().catch(()=>{});await status(component,e);
@@ -217,13 +244,15 @@ async function main():Promise<void> {
     if(control){await control.receive(initial);await activation;}else{lifecycle.activate();await store.activateBot(bot.identity);}
     if(stopped)return;
     await directories();
-    await Promise.all([bots(),initialize(),timers()]);
+    for(const component of ['Календарь','Telegram','Модель','Почта','Уведомления/календарь'])store.state.health[component]='starting';
+    await store.save();
+    await Promise.all([bots(),initialize(),timers(),updateChecks()]);
   }catch(error){
     fatalExit=true;control?.fatal('state-invariant','Worker operation or durable state failed; shutting down');throw error;
   }finally {
     // Promise.all rejects before its siblings finish. Stop their loop flags as
     // well as admission, otherwise terminal waits/sleeps become a busy loop.
-    stopped=true;activate();polling?.abort();lifecycle.stop();
+    stopped=true;updateAbort.abort();activate();polling?.abort();lifecycle.stop();
     if(fatalExit)await pi.session?.abort().catch(()=>{});
     await lifecycle.idle();
     control?.close();process.off('message',command);process.off('SIGINT',stop);process.off('SIGTERM',stop);process.off('disconnect',stop);

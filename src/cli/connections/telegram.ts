@@ -1,8 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { TelegramClient } from 'teleproto';
-import { StringSession } from 'teleproto/sessions/index.js';
-import { Logger, LogLevel } from 'teleproto/extensions/Logger.js';
+import {createTelegramClient} from '../../telegram-client.js';
 import type { UserAuthParams } from 'teleproto/client/auth.js';
 import { secret, secretsDir } from '../../config.js';
 import { writeSecret } from '../../store.js';
@@ -73,14 +71,7 @@ export async function telegram(ui: SetupUI, expectedOwnerId?: number, dependenci
     });
     const apiId = Number(secret('TELEGRAM_API_ID'));
     if (!Number.isSafeInteger(apiId) || apiId <= 0) throw new SetupIssue('Telegram API ID должен быть положительным числом');
-    const create = dependencies.createClient ?? ((session, id, hash) => {
-      const connection = new TelegramClient(new StringSession(session), id, hash, {
-        connectionRetries: 3, baseLogger: new Logger(LogLevel.NONE),
-      });
-      connection.setLogLevel(LogLevel.NONE);
-      return connection;
-    });
-    client = create(existing.trim(), apiId, secret('TELEGRAM_API_HASH'));
+    client = dependencies.createClient?.(existing.trim(), apiId, secret('TELEGRAM_API_HASH')) ?? await createTelegramClient(existing.trim());
     ui.note('Если Telegram-сессия уже сохранена, повторный код входа не потребуется.');
     // No progress animation here: the SDK can request interactive input during start().
     await client.start({

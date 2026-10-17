@@ -91,6 +91,7 @@ export async function updateSettings(home, change) {
   const unlock = await acquireLock(join(root, 'settings.lock'));
   try {
     const settings = { ...await readJSON(join(root, 'settings.json'), { enabled: true }), enabled: change.enabled };
+    delete settings.telegramUpdatePermission;
     await atomicJSON(join(root, 'settings.json'), settings); return settings;
   } finally { await unlock(); }
 }

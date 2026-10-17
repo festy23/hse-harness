@@ -85,7 +85,17 @@ export class CalDAVCollection implements CalendarCollection {
     if(value.recurrenceId&&!Number.isFinite(+new Date(value.recurrenceId)))throw new Error('Некорректный recurrence id');
     return {...value,url:url.href};
   }
-  private async objects(urls?:string[]){return this.client.fetchCalendarObjects({calendar:this.calendar,objectUrls:urls,urlFilter:()=>true});}
+  private async objects(urls?:string[]){
+    const base=new URL(this.calendar.url);
+    // iCloud can include the collection itself in calendar-query results. It
+    // cannot be fetched as VEVENT data; event resources may lack an .ics suffix.
+    return this.client.fetchCalendarObjects({calendar:this.calendar,objectUrls:urls,urlFilter:value=>{
+      try{
+        const url=new URL(value,base);
+        return url.origin===base.origin&&url.pathname.startsWith(base.pathname)&&url.pathname!==base.pathname&&!url.pathname.endsWith('/')&&!url.search&&!url.hash&&!url.username&&!url.password;
+      }catch{return false;}
+    }});
+  }
   // tsdav rejects a multiget 404 instead of returning an absent object. A complete,
   // validated collection snapshot distinguishes absence from a failed read.
   private async resource(url:string):Promise<DAVCalendarObject|undefined>{return (await this.objects()).find(o=>new URL(o.url,this.calendar.url).href===url);}

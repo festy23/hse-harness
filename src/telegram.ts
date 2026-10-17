@@ -1,39 +1,58 @@
 import { TelegramClient, Api } from 'teleproto';
-import { StringSession } from 'teleproto/sessions/index.js';
 import { getPeerId } from 'teleproto/Utils.js';
 import bigInt from 'big-integer';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HISTORY_FROM, type Source } from './domain.js';
 import type { Store } from './store.js';
-import { secret, secretsDir, type Config } from './config.js';
+import { secretsDir, type Config } from './config.js';
+import {createTelegramClient,telegramDeadline} from './telegram-client.js';
+import { resolveTelegramChat } from './telegram-chats.js';
+import { saveTelegramChat } from './config-file.js';
 
 type Common = {pts:number;qts:number;date:number;seq:number};
 export class TelegramSource {
   private client!:TelegramClient;
   private peers=new Map<string,Api.TypeInputPeer>();
-  constructor(readonly config:Config,readonly store:Store,readonly onReply:(chat:string,id:string)=>Promise<void>,readonly alert:(text:string)=>Promise<void>,readonly continuing:()=>boolean=()=>true) {}
+  constructor(readonly config:Config,readonly store:Store,readonly onReply:(chat:string,id:string)=>Promise<void>,readonly alert:(text:string)=>Promise<void>,readonly continuing:()=>boolean=()=>true,
+    private readonly options:{configPath?:string;createClient?:(session:string)=>TelegramClient}={}) {}
   async connect():Promise<void> {
     const saved=await readFile(join(secretsDir(),'telegram.session'),'utf8');
-    this.client=new TelegramClient(new StringSession(saved.trim()),Number(secret('TELEGRAM_API_ID')),secret('TELEGRAM_API_HASH'),{connectionRetries:3});
-    await this.client.connect();
-    if (!await this.client.checkAuthorization()) throw new Error('Telegram: повторите setup telegram');
+    this.client=this.options.createClient?.(saved.trim())??await createTelegramClient(saved.trim());
+    await telegramDeadline(this.client.connect(),45000);
+    if (!await telegramDeadline(this.client.checkAuthorization(),15000)) throw new Error('Telegram: повторите setup telegram');
     // Polling raw difference со своими устойчивыми counters; auth session их не сохраняет.
     this.client.updateManager.stop();
-    const dialogs=await this.client.getDialogs({limit:undefined});
+    const dialogs=await telegramDeadline(this.client.getDialogs({limit:undefined}),30000);
     for(const chat of this.config.chats) {
       const entity=dialogs.find(d=>d.id?.toString()===chat.id)?.entity;
       if (!entity) throw new Error(`Нет доступа к выбранному чату ${chat.id}`);
       this.peers.set(chat.id,await this.client.getInputEntity(entity));
     }
   }
+  listChats() {
+    return this.config.chats.map(chat=>({...chat,allowQuestions:chat.allowQuestions!==false,connected:this.peers.has(chat.id),historyLoaded:Boolean(this.store.state.cursors[`tgHistory:${chat.id}`])}));
+  }
+  async addChat(reference:string) {
+    if(!this.client)throw new Error('Telegram ещё не подключён; повтори попытку после восстановления соединения');
+    const {chat,peer}=await resolveTelegramChat(this.client,reference);
+    const alreadyAdded=this.config.chats.some(c=>c.id===chat.id);
+    const saved=await saveTelegramChat(this.options.configPath??process.env.STUDY_CONFIG??'config.local.json',chat,this.config.ownerId);
+    const index=this.config.chats.findIndex(c=>c.id===saved.id);
+    if(index<0)this.config.chats.push(saved);else this.config.chats[index]=saved;
+    this.peers.set(saved.id,peer);
+    return {...saved,allowQuestions:saved.allowQuestions!==false,alreadyAdded,historyFrom:HISTORY_FROM,backfillPending:!this.store.state.cursors[`tgHistory:${saved.id}`]};
+  }
   async poll():Promise<void> {
+    // A chat added during an await belongs to the next poll. In particular, its
+    // channel difference must not run before initialization of its pts cursor.
+    const peers=[...this.peers];
     if (!this.store.state.cursors.tgState) {
       const s=await this.client.invoke(new Api.updates.GetState());
       this.store.state.cursors.tgState=JSON.stringify({pts:s.pts,qts:s.qts,date:s.date,seq:s.seq});
       await this.store.save();
     }
-    for(const [id,peer] of this.peers) {
+    for(const [id,peer] of peers) {
       if(!this.continuing())return;
       const key=`tgChannel:${id}`;
       if (peer instanceof Api.InputPeerChannel && !this.store.state.cursors[key]) {
@@ -47,7 +66,7 @@ export class TelegramSource {
       }
     }
     await this.commonDifference();
-    for(const [id,peer] of this.peers) {if(!this.continuing())return;if(peer instanceof Api.InputPeerChannel) await this.channelDifference(id,peer);}
+    for(const [id,peer] of peers) {if(!this.continuing())return;if(peer instanceof Api.InputPeerChannel) await this.channelDifference(id,peer);}
   }
   private source(chat:string,m:Api.Message):Source {
     const reply=m.replyTo instanceof Api.MessageReplyHeader ? m.replyTo.replyToMsgId : undefined;
@@ -141,6 +160,7 @@ export class TelegramSource {
     return result;
   }
   async question(chat:string,text:string,randomId:string):Promise<string> {
+    if(this.config.chats.find(c=>c.id===chat)?.allowQuestions===false)throw new Error('Чат подключён только для чтения; отправка вопросов не разрешена');
     const peer=this.peers.get(chat);if(!peer) throw new Error('Чат не разрешен');
     const r=await this.client.invoke(new Api.messages.SendMessage({peer,message:text,randomId:bigInt(randomId)}));
     if(r instanceof Api.UpdateShortSentMessage) return String(r.id);
@@ -150,5 +170,5 @@ export class TelegramSource {
     }
     throw new Error('Отправка не подтверждена id сообщения; повторю с тем же random_id');
   }
-  async close():Promise<void> {await this.client?.disconnect();}
+  async close():Promise<void> {if(this.client)await telegramDeadline(this.client.disconnect(),5000).catch(()=>{});}
 }

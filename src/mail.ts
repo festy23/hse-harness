@@ -3,6 +3,7 @@ import { convert } from 'html-to-text';
 import { HISTORY_FROM, hash, type Source } from './domain.js';
 import { secret, type Config } from './config.js';
 import type { Store } from './store.js';
+import {guardImapClient,assertImapHealthy} from './imap-session.js';
 
 export function textPart(node:MessageStructureObject|undefined):MessageStructureObject|undefined {
   if(!node || node.disposition?.toLowerCase()==='attachment' || node.dispositionParameters?.filename || node.parameters?.name || node.type==='message/rfc822') return;
@@ -13,9 +14,9 @@ export function textPart(node:MessageStructureObject|undefined):MessageStructure
 export class MailSource {
   constructor(readonly config:Config,readonly store:Store,readonly continuing:()=>boolean=()=>true) {}
   async poll():Promise<void> {
-    const client=new ImapFlow({host:'imap.yandex.ru',port:993,secure:true,logger:false,connectionTimeout:20_000,socketTimeout:30_000,auth:{user:secret('YANDEX_ADDRESS'),pass:secret('YANDEX_APP_PASSWORD')}});
-    await client.connect();
+    const client=guardImapClient(new ImapFlow({host:'imap.yandex.ru',port:993,secure:true,logger:false,connectionTimeout:20_000,socketTimeout:30_000,auth:{user:secret('YANDEX_ADDRESS'),pass:secret('YANDEX_APP_PASSWORD')}}));
     try {
+      await client.connect();assertImapHealthy(client);
       const folders=this.config.folders.length ? this.config.folders : (await client.list()).filter(f=>!['\\Trash','\\Junk','\\Drafts'].includes(f.specialUse??'')).map(f=>f.path);
       for(const folder of folders) {
         if(!this.continuing())return;
@@ -52,13 +53,16 @@ export class MailSource {
                 const envelope=m.envelope;
                 const messageId=envelope?.messageId??`${folder}:${validity}:${m.uid}`;
                 const s:Source={id:`mail:${hash(messageId)}`,kind:'mail',text:`Тема: ${envelope?.subject??''}\n${text}`,date:new Date(m.internalDate).toISOString(),author:envelope?.from?.map(a=>a.address).join(', '),url:'https://mail.yandex.ru/'};
-                await this.store.enqueue([s]);
+                assertImapHealthy(client);await this.store.enqueue([s]);
               }
-              this.store.state.cursors[key]=`${validity}:${m.uid}`;await this.store.save();
+              assertImapHealthy(client);this.store.state.cursors[key]=`${validity}:${m.uid}`;await this.store.save();
             }
           }
         } finally {lock.release();}
       }
-    } finally {await client.logout().catch(()=>client.close());}
+      assertImapHealthy(client);
+    } finally {
+      try{if(client.usable)await client.logout();}catch{}finally{client.close();}
+    }
   }
 }

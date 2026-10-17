@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hash, validateTask, type Job, type Source, type Task } from './domain.js';
 import {stableVersion,type AvailableRelease} from './updates/releases.js';
+import {OperationError,yieldIfNeeded,type OperationContext} from './operations.js';
 
 export interface NpmUpdateState {
   botIdentity?:string;
@@ -23,6 +24,7 @@ export interface TaskOperation {
   notify:boolean;
   created:number;
   supersededBy?:string;
+  writeAttempted?:boolean;
 }
 
 export interface Approval {
@@ -62,8 +64,12 @@ const empty = (): State => ({schemaVersion:2,botOffset:0,cursors:{},queue:[],own
 
 export class Store {
   state: State = empty();
-  private writes: Promise<void> = Promise.resolve();
-  private writeFailure?: unknown;
+  private requestedRevision=0;
+  private durableRevision=0;
+  private writing=false;
+  private pendingWrite=false;
+  private writeFailure?:OperationError;
+  private readonly waiters:{revision:number;resolve:()=>void;reject:(error:unknown)=>void}[]=[];
   constructor(readonly dir: string) {}
   async load(options: {readOnly?: boolean} = {}): Promise<void> {
     if (!options.readOnly) await mkdir(this.dir, {recursive:true, mode:0o700});
@@ -94,6 +100,7 @@ export class Store {
       }
       for(const [id,operation] of Object.entries(s.taskOperations??{})){
         if(!operation||operation.id!==id||typeof operation.taskId!=='string'||!['pending','applied','notified','conflict','superseded'].includes(operation.phase)||typeof operation.notify!=='boolean'||!Number.isFinite(operation.created))throw new Error('Invalid calendar operation');
+        if(operation.writeAttempted!==undefined&&typeof operation.writeAttempted!=='boolean')throw new Error('Invalid calendar write attempt');
         validateTask(operation.desiredTask);if(operation.beforeTask)validateTask(operation.beforeTask);
         if(operation.desiredTask.id!==operation.taskId||operation.beforeTask&&operation.beforeTask.id!==operation.taskId)throw new Error('Invalid calendar operation task ID');
       }
@@ -101,9 +108,42 @@ export class Store {
     }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
   }
-  async save(): Promise<void> {
-    const snapshot = JSON.stringify(this.state);
-    const write = async () => {
+  save(): Promise<void> {
+    if(this.writeFailure)return Promise.reject(this.writeFailure);
+    const revision=++this.requestedRevision;
+    this.pendingWrite=true;
+    const result=this.waitForRevision(revision);
+    if(!this.writing){this.writing=true;queueMicrotask(()=>{void this.writePending();});}
+    return result;
+  }
+  private waitForRevision(revision:number):Promise<void>{
+    if(this.writeFailure)return Promise.reject(this.writeFailure);
+    if(this.durableRevision>=revision)return Promise.resolve();
+    return new Promise<void>((resolve,reject)=>this.waiters.push({revision,resolve,reject}));
+  }
+  private async writePending():Promise<void>{
+    try{
+      while(this.pendingWrite){
+        this.pendingWrite=false;
+        const revision=this.requestedRevision;
+        // One snapshot covers this batch. Requests made while its fsync is in
+        // flight are covered by the next snapshot, never by an older receipt.
+        const snapshot=JSON.stringify(this.state);
+        await this.persistSnapshot(snapshot);
+        this.durableRevision=revision;
+        const next=this.waiters.findIndex(waiter=>waiter.revision>revision);
+        for(const waiter of this.waiters.splice(0,next<0?this.waiters.length:next))waiter.resolve();
+      }
+    }catch(error){
+      this.writeFailure=error instanceof OperationError&&error.kind==='durability'?error:new OperationError('durability','Не удалось сохранить состояние операций');
+      this.pendingWrite=false;
+      for(const waiter of this.waiters.splice(0))waiter.reject(this.writeFailure);
+    }finally{
+      this.writing=false;
+    }
+  }
+  /** A resolved snapshot has crossed both file and directory durability barriers. */
+  protected async persistSnapshot(snapshot:string):Promise<void>{
       const path = join(this.dir,'operations.json');
       const temp = path + '.' + randomUUID();
       const handle = await open(temp, 'wx', 0o600);
@@ -111,24 +151,36 @@ export class Store {
       await rename(temp,path);
       const directory = await open(this.dir, 'r');
       try { await directory.sync(); } finally { await directory.close(); }
-    };
-    this.writes = this.writes.then(write,write).catch(error => { this.writeFailure ??= error; throw error; });
-    return this.writes;
   }
   async flush(): Promise<void> {
-    await this.writes;
-    if (this.writeFailure) throw this.writeFailure;
+    await this.waitForRevision(this.requestedRevision);
   }
-  async enqueue(sources: Source[]): Promise<void> {
-    const accepted = sources.filter(s => this.state.seen[s.id] !== hash(JSON.stringify(s)));
-    if (!accepted.length) return;
-    for (const s of accepted) this.state.seen[s.id] = hash(JSON.stringify(s));
-    const pieces:Source[]=[];
-    for(const s of accepted) {
-      if(s.text.length<=6000){pieces.push(s);continue;}
-      const total=Math.ceil(s.text.length/5800);
-      for(let i=0,offset=0;offset<s.text.length;i++,offset+=5800) pieces.push({...s,text:`[Часть ${i+1}/${total} одного источника ${s.id}; границы перекрываются]\n${s.text.slice(offset,offset+6000)}`});
+  async enqueue(sources: Source[],ctx?:OperationContext): Promise<void> {
+    const prepared:{source:Source;fingerprint:string;pieces:Source[]}[]=[];
+    let since=performance.now();
+    for(const s of sources){
+      ctx?.throwIfAborted();
+      const fingerprint=hash(JSON.stringify(s));
+      if(this.state.seen[s.id]===fingerprint){since=await yieldIfNeeded(since,ctx?.signal);continue;}
+      const pieces:Source[]=[];
+      if(s.text.length<=6000)pieces.push(s);
+      else{
+        const total=Math.ceil(s.text.length/5800);
+        for(let i=0,offset=0;offset<s.text.length;i++,offset+=5800){
+          pieces.push({...s,text:`[Часть ${i+1}/${total} одного источника ${s.id}; границы перекрываются]\n${s.text.slice(offset,offset+6000)}`});
+          since=await yieldIfNeeded(since,ctx?.signal);
+        }
+      }
+      prepared.push({source:s,fingerprint,pieces});
+      since=await yieldIfNeeded(since,ctx?.signal);
     }
+    ctx?.throwIfAborted();
+    const accepted=prepared.filter(s=>this.state.seen[s.source.id]!==s.fingerprint);
+    if (!accepted.length) return;
+    // Publish seen and queue together. Yielding after publishing only seen
+    // would allow an unrelated save to lose the source on crash/restart.
+    for(const s of accepted)this.state.seen[s.source.id]=s.fingerprint;
+    const pieces=accepted.flatMap(s=>s.pieces);
     for(let i=0;i<pieces.length;i+=4)this.state.queue.push({id:randomUUID(),sources:pieces.slice(i,i+4)});
     await this.save();
   }
@@ -146,7 +198,7 @@ export class Store {
     const key = updateId === undefined ? undefined : identity?`${identity}:${updateId}`:String(updateId);
     if (key && this.state.ownerUpdates[key]) return;
     this.state.queue.push({id:key ? `owner:${key}` : randomUUID(),sources:[],ownerText});
-    if (key) { this.state.ownerUpdates[key] = true; this.state.botOffset = Math.max(this.state.botOffset, updateId! + 1); }
+    if (key) this.state.ownerUpdates[key] = true;
     await this.save();
   }
 }

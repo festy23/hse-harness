@@ -34,7 +34,7 @@ test('stable launcher lives outside npm root; repeated baseline setup retains di
   const first = await installRuntime({ home, packageRoot: project, releaseStore: store });
   assert.equal(first.launcher, join(home, 'runtime/launcher.mjs'));
   const launcher = await readFile(first.launcher, 'utf8');
-  assert.match(launcher, /engines\/1\.0\.0-/);
+  assert.match(launcher, /engines\/1\.0\.1-/);
   assert.ok(!launcher.includes(project));
   await installRuntime({ home, packageRoot: project, releaseStore: store });
   assert.equal((await readRuntimeStatus(home)).updatesEnabled, false);
@@ -69,12 +69,38 @@ test('foreground restart retains the running baseline, rollback hold and interru
   state.manualHold = { version: '0.3.0', integrity: 'fixture' };
   state.attempt = { id: 'recover-me', phase: 'draining', from: state.active, to: { ...state.active, version: '0.3.0' } };
   await atomicJSON(path, state);
-  store.prepare = async () => { throw new Error('Restart must not prepare/promote installed target'); };
+  let prepared;
+  const prepare = store.prepare.bind(store);
+  store.prepare = async version => { prepared = version; return prepare(version); };
   await installRuntime({ home, packageRoot: project, releaseStore: store });
   const after = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(after.active.version, state.active.version);
   assert.equal(after.manualHold.version, '0.3.0');
   assert.equal(after.attempt.id, 'recover-me');
+  assert.equal(prepared, JSON.parse(await readFile(join(project, 'package.json'), 'utf8')).version);
+});
+
+test('serviced engine upgrade uses verified installed release while preserving an older selected worker', async t => {
+  const { home, store } = await fixture(t);
+  await installRuntime({ home, packageRoot: project, releaseStore: store });
+  const path = join(home, 'runtime/state.json');
+  const state = JSON.parse(await readFile(path, 'utf8'));
+  const oldRoot = join(home, 'old-worker');
+  await mkdir(join(oldRoot, 'runtime'), { recursive: true });
+  await writeFile(join(oldRoot, 'runtime/supervisor.mjs'), 'export const oldEngine = true;');
+  state.active = { ...state.active, version: '0.2.2', packageRoot: oldRoot };
+  state.previous = { ...state.active, version: '0.2.1' };
+  state.quarantine = [{ version: '0.2.4', integrity: 'fixture' }];
+  state.manualHold = { version: '0.2.3' };
+  state.attempt = { id: 'interrupted', phase: 'draining', from: state.active, to: state.previous };
+  await atomicJSON(path, state);
+  const installed = await installRuntime({ home, packageRoot: project, releaseStore: store });
+  const after = JSON.parse(await readFile(path, 'utf8'));
+  for (const field of ['active', 'previous', 'quarantine', 'manualHold', 'attempt']) assert.deepEqual(after[field], state[field]);
+  const launcher = await readFile(installed.launcher, 'utf8');
+  const engine = /from "(\.\/engines\/[^\"]+\/supervisor\.mjs)"/.exec(launcher)?.[1];
+  assert.ok(engine);
+  assert.match(await readFile(join(home, 'runtime', engine), 'utf8'), /SUPERVISOR_VERSION = '1\.0\.1'/);
 });
 
 test('installation refuses a symlink runtime without writing its destination', async t => {
@@ -83,4 +109,15 @@ test('installation refuses a symlink runtime without writing its destination', a
   await symlink(outside, join(home, 'runtime'));
   await assert.rejects(installRuntime({ home, packageRoot: project, releaseStore: store }), /directory/);
   await assert.rejects(access(join(outside, 'state.json')), { code: 'ENOENT' });
+});
+
+test('failed verification of installed engine leaves selected release and launcher intact', async t => {
+  const { home, store } = await fixture(t);
+  const installed = await installRuntime({ home, packageRoot: project, releaseStore: store });
+  const journalPath = join(home, 'runtime/state.json');
+  const before = await readFile(journalPath, 'utf8'), launcher = await readFile(installed.launcher, 'utf8');
+  store.prepare = async () => { throw new Error('installed engine verification failed'); };
+  await assert.rejects(installRuntime({ home, packageRoot: project, releaseStore: store }), /verification failed/);
+  assert.equal(await readFile(journalPath, 'utf8'), before);
+  assert.equal(await readFile(installed.launcher, 'utf8'), launcher);
 });

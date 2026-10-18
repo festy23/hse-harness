@@ -1,3 +1,4 @@
+import {budgets,createOperation,withOperation} from '../../operations.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DAVCalendar } from 'tsdav';
@@ -118,6 +119,8 @@ export async function discoverCalDAVCalendars(client: CalDAVDiscovery): Promise<
 }
 
 async function caldavChoices(provider: 'icloud' | 'yandex', signal?: AbortSignal): Promise<Choice[]> {
+  const parent=signal,operation=createOperation('connect',budgets.calendarScan,signal);signal=operation.signal;
+  try{
   if (signal?.aborted) throw new SetupCancelled();
   const { createDAVClient } = await import('tsdav');
   const cloud = provider === 'icloud';
@@ -148,7 +151,8 @@ async function caldavChoices(provider: 'icloud' | 'yandex', signal?: AbortSignal
     fetch: request,
   });
   if (signal?.aborted) throw new SetupCancelled();
-  return discoverCalDAVCalendars(client);
+  return await discoverCalDAVCalendars(client);
+  }catch(error){if(parent?.aborted)throw new SetupCancelled();operation.throwIfAborted();throw error;}finally{operation.dispose();}
 }
 
 export async function connectCalendars(
@@ -182,17 +186,17 @@ export async function connectCalendars(
         const api = new Google();
         // Google refresh can persist credentials: wait for its bounded request to
         // finish before rollback, rather than racing cancellation with a late write.
-        return googleCalendarChoices(async path => {
+        return withOperation('connect',budgets.calendarScan,signal,op=>googleCalendarChoices(async path => {
           if (signal?.aborted) throw new SetupCancelled();
           try {
-            const page = await api.request<GoogleCalendarPage>(path);
+            const page = await api.request<GoogleCalendarPage>(path,'GET',undefined,op);
             if (signal?.aborted) throw new SetupCancelled();
             return page;
           } catch (error) {
             if (signal?.aborted) throw new SetupCancelled();
             throw error;
           }
-        });
+        }));
       });
     }
     return await ui.task(`Получаю календари ${name}`, (signal?: AbortSignal) => caldavChoices(provider, signal));

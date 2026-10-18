@@ -35,8 +35,9 @@ export async function installRuntime(options) {
     const store = options.releaseStore ?? new ReleaseStore(home, { node, npm: options.npm ?? await findNpm() });
     // A CLI restart must not bypass a manual hold, quarantine or interrupted
     // handoff by silently promoting the version installed in npm.
-    const active = old?.active ? await store.validate(old.active) : await store.prepare(metadata.version);
-    const runtimeSource = join(active.packageRoot, 'runtime');
+    const engineSource = await store.prepare(metadata.version);
+    const active = old?.active ? await store.validate(old.active) : engineSource;
+    const runtimeSource = join(engineSource.packageRoot, 'runtime');
     const modules = (await readdir(runtimeSource)).filter(name => name.endsWith('.mjs')).sort();
     if (!modules.includes('supervisor.mjs')) throw new Error('Выпуск не содержит supervisor');
     const bytes = await Promise.all(modules.map(async name => [name, await readFile(join(runtimeSource, name))]));
@@ -91,6 +92,7 @@ export async function updateSettings(home, change) {
   const unlock = await acquireLock(join(root, 'settings.lock'));
   try {
     const settings = { ...await readJSON(join(root, 'settings.json'), { enabled: true }), enabled: change.enabled };
+    delete settings.telegramUpdatePermission;
     await atomicJSON(join(root, 'settings.json'), settings); return settings;
   } finally { await unlock(); }
 }

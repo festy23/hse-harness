@@ -19,7 +19,7 @@ export async function telegram({ state, ui, connections, credential }: StepConte
   const choices = [...account.chats, ...unavailable.map(chat => ({ id: chat.id, label: chat.title, hint: 'сохранён, сейчас недоступен' }))];
   const ids = await ui.many('Чаты и каналы для чтения', choices, old.map(chat => chat.id));
   state.config.ownerId = account.ownerId;
-  state.config.chats = ids.map(id => ({ id, title: choices.find(choice => choice.id === id)!.label }));
+  state.config.chats = ids.map(id => ({ ...old.find(chat=>chat.id===id), id, title: choices.find(choice => choice.id === id)!.label }));
   await state.save();
   ui.note(`Выбрано источников: ${ids.length}\nЛичный диалог: https://t.me/${username} → Start\nownerId определён автоматически.`, label);
 }

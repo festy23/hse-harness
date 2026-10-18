@@ -1,0 +1,6 @@
+{"recordedOn": "2026-10-17", "environment": "Local macOS development machine, not VPS or dedicated performance runner", "snapshotSink": "In-memory asynchronous sink; measures coalescing and main-thread JSON snapshot, not disk throughput"}
+{"host": {"node": "v26.5.0", "platform": "darwin", "arch": "arm64", "cpu": "Apple M3", "memoryGiB": 16}, "note": "Synthetic local fixtures; native Pi synchronous persistence and individual JSON snapshots remain on the main thread."}
+{"name": "Pi search 10000 original entries, absent query", "elapsedMs": 87.78, "maxTimerGapMs": 10.36, "p95TimerGapMs": 6.18, "timerTicks": 23, "matches": 0}
+{"name": "50MiB state, 100 concurrent save barriers", "elapsedMs": 64.02, "maxTimerGapMs": 65.12, "p95TimerGapMs": 65.12, "timerTicks": 8, "writes": 1, "requestedSaves": 100}
+{"name": "HTML nearly 1MB, real compiled worker", "elapsedMs": 108.81, "maxTimerGapMs": 5.78, "p95TimerGapMs": 1.2, "timerTicks": 100, "inputBytes": 999026, "outputCharacters": 589408}
+{"name": "20 hourly recurrences over 31 days, worker", "elapsedMs": 163.8, "maxTimerGapMs": 1.67, "p95TimerGapMs": 1.32, "timerTicks": 153, "occurrences": 14700}

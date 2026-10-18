@@ -202,16 +202,21 @@ test('disable after finish is accepted restores old release instead of leaving t
 });
 
 test('disable during candidate local readiness prevents activation and restores the old release', async () => {
-  await fixture(async ({ home, install, state, events, launch }) => {
-    launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+  await fixture(async ({ home, install, state, events, launch, releases }) => {
+    const entry=join(releases.get('0.3.0').packageRoot,'dist/main.js');
+    const source=await readFile(entry,'utf8');
+    await writeFile(entry,source.replace("setTimeout(() => send(message, 'boot-ready'), options.bootDelay ?? 0);",
+      "const gateTimer=setInterval(()=>{if(existsSync(join(home,version+'.allow-boot'))){clearInterval(gateTimer);send(message,'boot-ready');}},5);"));
+    launch({bootMs:3000}); await eventually(async () => (await state()).runningVersion === '0.2.0');
     await install('0.3.0');
     await eventually(async () => (await events()).some(event => event.type === 'prepare' && event.version === '0.3.0'));
     await atomicJSON(join(home, 'runtime', 'settings.json'), { enabled: false });
+    await writeFile(join(home,'0.3.0.allow-boot'),'ready');
     await eventually(async () => (await state()).updatesEnabled === false && !(await state()).attempt);
     assert.equal((await state()).runningVersion, '0.2.0');
     assert.equal((await events()).some(event => event.type === 'activate' && event.version === '0.3.0'), false);
     assert.deepEqual((await state()).quarantine, []);
-  }, { '0.3.0': { bootDelay: 35 } });
+  });
 });
 
 test('disable during probation returns the confirmed previous writer without discarding candidate changes', async () => {
@@ -255,15 +260,29 @@ test('a busy manual rollback is retried after deferred drain without another own
 
 test('retry of a recovered live heartbeat clears persisted blocked state before a later reboot', async () => {
   await fixture(async ({ home, state, launch }) => {
-    const first = launch({ heartbeatMs: 80 }); await eventually(async () => (await state()).phase === 'blocked');
+    // Control expiry without requiring the real IPC round-trip to beat 80 ms on
+    // a loaded runner. Permission to send health is not evidence of its receipt.
+    let now = 1000;
+    const first = launch({ heartbeatMs: 80, clock: () => now });
+    await eventually(async () => (await state()).runningVersion === '0.2.0');
+    const workerId = first.worker.id;
+    now += 81;
+    await eventually(async () => (await state()).phase === 'blocked');
+    await atomicJSON(join(home, 'runtime', 'settings.json'), { enabled: true, request: { id: 'premature-heartbeat-retry', action: 'retry' } });
+    await eventually(async () => (await state()).lastRequestId === 'premature-heartbeat-retry');
+    assert.equal((await state()).phase, 'blocked', 'retry without a received heartbeat cannot authorize another writer');
+    assert.equal(first.worker.id, workerId);
     await writeFile(join(home, '0.2.0.allow-health'), 'ready');
+    await eventually(() => first.lastHeartbeat === now);
     await atomicJSON(join(home, 'runtime', 'settings.json'), { enabled: true, request: { id: 'live-heartbeat-retry', action: 'retry' } });
     await eventually(async () => (await state()).lastRequestId === 'live-heartbeat-retry');
     assert.notEqual((await state()).phase, 'blocked');
+    assert.equal(first.blocked, false);
+    assert.equal(first.worker.id, workerId);
     first.requestStop(); await first.testCompletion;
     launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
     assert.equal(await readFile(join(home, 'fixture.data'), 'utf8'), '0.2.0\n0.2.0\n');
-  }, { '0.2.0': { healthGate: true } });
+  }, { '0.2.0': { healthGate: true, healthIntervalMs: 250 } });
 });
 
 test('recovery of a persisted user-cancel rollback keeps its no-quarantine policy', async () => {
@@ -351,5 +370,241 @@ await supervisor.run().catch(error => { console.error('EXPECTED_JOURNAL_FAILURE'
       clearTimeout(timeout);
       if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exit; }
     }
+  });
+});
+
+test('worker crash recovers before a pending preparation completes; only the monitor promotes afterward', async () => {
+  await fixture(async ({ install, state, events, launch, releases, store }) => {
+    let releasePreparation; const gate = new Promise(resolve => { releasePreparation = resolve; }); let prepares = 0;
+    store.prepare = async version => { prepares++; await gate; return releases.get(version); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => prepares === 1);
+    supervisor.worker.child.kill('SIGTERM');
+    await eventually(async () => (await events()).filter(e => e.version === '0.2.0' && e.type === 'activate').length === 2);
+    assert.equal(supervisor.preparation.status, 'pending');
+    assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+    releasePreparation();
+    await eventually(async () => (await state()).active.version === '0.3.0');
+    assert.equal(prepares, 1); assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('disabled preparation settles late without promotion or retry penalty while recovery continues', async () => {
+  await fixture(async ({ home, install, state, events, launch, releases, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; });
+    store.prepare = async (version, options) => { signal = options.signal; await gate; return releases.get(version); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal));
+    await atomicJSON(join(home, 'runtime/settings.json'), { enabled: false });
+    await eventually(() => signal.aborted);
+    supervisor.worker.child.kill('SIGTERM');
+    await eventually(async () => (await events()).filter(e => e.version === '0.2.0' && e.type === 'activate').length === 2);
+    releasePreparation(); await eventually(() => supervisor.preparation === null);
+    assert.equal(supervisor.retryCount, 0); assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('superseding installed version cancels cleanup before another preparation and ignores late success', async () => {
+  await fixture(async ({ install, state, events, launch, releases, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; }); const prepares = [];
+    store.prepare = async (version, options) => { prepares.push(version); if (version === '0.3.0') { signal = options.signal; await gate; } return releases.get(version); };
+    launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal)); await install('0.4.0');
+    await eventually(() => signal.aborted); await wait(40); assert.deepEqual(prepares, ['0.3.0']);
+    releasePreparation(); await eventually(async () => (await state()).active.version === '0.4.0');
+    assert.deepEqual(prepares, ['0.3.0', '0.4.0']);
+    assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('manual rollback waits cancelled preparation cleanup and never promotes its late result', async () => {
+  await fixture(async ({ home, install, state, events, launch, releases, store }) => {
+    launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(async () => (await state()).active.version === '0.3.0' && !(await state()).attempt);
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; });
+    store.prepare = async (version, options) => { signal = options.signal; await gate; return releases.get(version); };
+    await install('0.4.0'); await eventually(() => Boolean(signal));
+    await atomicJSON(join(home, 'runtime/settings.json'), { enabled: true, request: { id: 'rollback-pending-preparation', action: 'rollback' } });
+    await eventually(() => signal.aborted); await wait(40);
+    assert.equal((await state()).lastRequestId, undefined);
+    releasePreparation(); await eventually(async () => (await state()).active.version === '0.2.0' && !(await state()).attempt);
+    assert.equal((await events()).some(e => e.version === '0.4.0'), false);
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('stop retains ownership until cancelled preparation cleanup settles and discards late rejection', async () => {
+  await fixture(async ({ home, install, state, events, launch, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; });
+    store.prepare = async (_version, options) => { signal = options.signal; await gate; throw new Error('late aborted installer failure'); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal));
+    let stopped = false; supervisor.testCompletion.finally(() => { stopped = true; });
+    supervisor.requestStop(); await eventually(() => supervisor.worker.exited); await wait(40);
+    assert.equal(signal.aborted, true); assert.equal(stopped, false);
+    assert.ok(JSON.parse(await readFile(join(home, 'runtime/supervisor.lock'), 'utf8')).ownerId);
+    releasePreparation(); await supervisor.testCompletion;
+    await assert.rejects(readFile(join(home, 'runtime/supervisor.lock')), { code: 'ENOENT' });
+    assert.equal(supervisor.retryCount, 0); assert.equal((await events()).some(e => e.version === '0.3.0'), false);
+  });
+});
+
+test('reboot with a descriptive preparing phase reconstructs work without a phantom pending task', async () => {
+  await fixture(async ({ home, install, state, launch, store, releases }) => {
+    const journal = await state(); journal.phase = 'preparing'; journal.pendingVersion = '0.3.0';
+    await atomicJSON(join(home, 'runtime/state.json'), journal); await install('0.3.0');
+    let prepares = 0; store.prepare = async version => { prepares++; return releases.get(version); };
+    launch(); await eventually(async () => (await state()).active.version === '0.3.0');
+    assert.equal(prepares, 1);
+  });
+});
+
+test('retry cancels a pending preparation and waits its late rejection before a fresh attempt', async () => {
+  await fixture(async ({ home, install, state, events, launch, releases, store }) => {
+    let releasePreparation, signal; const gate = new Promise(resolve => { releasePreparation = resolve; }); let prepares = 0;
+    store.prepare = async (version, options) => { prepares++; if (prepares === 1) { signal = options.signal; await gate; throw new Error('cancelled old attempt'); } return releases.get(version); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(() => Boolean(signal));
+    await atomicJSON(join(home, 'runtime/settings.json'), { enabled: true, request: { id: 'retry-preparation', action: 'retry' } });
+    await eventually(() => signal.aborted); await wait(40); assert.equal(prepares, 1);
+    releasePreparation(); await eventually(async () => (await state()).active.version === '0.3.0');
+    assert.equal(prepares, 2); assert.equal(supervisor.retryCount, 0);
+    assert.equal((await state()).lastRequestId, 'retry-preparation');
+    assert.equal((await events()).some(e => e.type === 'overlap'), false);
+  });
+});
+
+test('failed background preparation records one backoff and keeps the owned worker active', async () => {
+  await fixture(async ({ install, state, events, launch, store }) => {
+    let prepares = 0; store.prepare = async () => { prepares++; throw new Error('preparation fixture failed'); };
+    const supervisor = launch(); await eventually(async () => (await state()).runningVersion === '0.2.0');
+    await install('0.3.0'); await eventually(async () => (await state()).deferredReason === 'preparation fixture failed');
+    await wait(60); assert.equal(prepares, 1); assert.equal(supervisor.retryCount, 1);
+    assert.equal((await state()).runningVersion, '0.2.0');
+    assert.equal((await events()).some(e => e.type === 'drain' || e.version === '0.3.0'), false);
+  });
+});
+
+test('notice acknowledgement save failure enters fatal shutdown and retains ownership until actual worker exit', async () => {
+  await fixture(async ({ home, state, events, launch }) => {
+    const logs=[];const supervisor=launch({finishMs:25,log:message=>logs.push(message)});
+    await eventually(()=>supervisor.worker?.mode==='active');
+    const worker=supervisor.worker,kill=worker.child.kill.bind(worker.child),signals=[];
+    worker.child.kill=signal=>{signals.push(signal);return true;};
+    const save=supervisor.save.bind(supervisor);let armed=true;
+    supervisor.save=async()=>{
+      if(armed&&!(supervisor.state.notices??[]).some(notice=>notice.id==='fatal-ack')){
+        armed=false;throw new Error('Notice acknowledgement durable save failed');
+      }
+      await save();
+    };
+    // Insert the notice before any awaited work so the next acknowledgement is
+    // the isolated failure, rather than a normal empty-journal poll save.
+    supervisor.state.notices=[{id:'fatal-ack',text:'Fixture notice'}];
+    let settled=false;supervisor.testCompletion.then(()=>{settled=true;},()=>{settled=true;});
+    try{
+      await save();supervisor.deliverNotices();
+      await eventually(()=>logs.some(message=>message.includes('Fatal supervisor failure')));
+      assert.equal(supervisor.stopping,true);assert.equal(worker.exited,false);assert.equal(settled,false);
+      assert.deepEqual(signals,['SIGTERM']);
+      assert.ok(JSON.parse(await readFile(join(home,'runtime/supervisor.lock'),'utf8')).ownerId);
+      kill('SIGTERM');
+      await assert.rejects(supervisor.testCompletion,/Notice acknowledgement durable save failed/);
+      await assert.rejects(readFile(join(home,'runtime/supervisor.lock')),{code:'ENOENT'});
+      assert.equal((await events()).some(event=>event.type==='stop'&&event.cause==='SIGTERM'),true);
+      assert.equal((await state()).runningVersion,'0.2.0','failed supervisor never claims an unconfirmed clean exit in the journal');
+    }finally{worker.child.kill=kill;if(!worker.exited)kill('SIGTERM');}
+  });
+});
+
+test('synchronous child send failure rejects its command and requests graceful shutdown without throwing from IPC delivery', async () => {
+  const signals=[];const supervisor=new Supervisor('/unused-send-fixture');
+  supervisor.worker={id:'worker',attemptId:'attempt',exited:false,child:{connected:true,send(){throw Error('IPC channel race');},kill(signal){signals.push(signal);}}};
+  await assert.rejects(supervisor.command('prepare','boot-ready',1000),/Worker IPC disconnected/);
+  assert.equal(supervisor.waiters.size,0);assert.equal(supervisor.stopping,true);
+  assert.match(supervisor.backgroundFailure.message,/Worker IPC disconnected/);assert.deepEqual(signals,['SIGTERM']);
+});
+
+test('asynchronous child send failure belongs to its captured worker and cannot stop a later incarnation', async () => {
+  const supervisor=new Supervisor('/unused-send-fixture');let callback;const signals=[];
+  const old={id:'old',attemptId:'attempt',exited:false,child:{connected:true,send(_message,done){callback=done;},kill(signal){signals.push(['old',signal]);}}};
+  supervisor.worker=old;supervisor.send('notice',{id:'fixture',text:'Fixture'});
+  supervisor.worker={id:'new',attemptId:'new-attempt',exited:false,child:{connected:true,kill(signal){signals.push(['new',signal]);}}};
+  assert.doesNotThrow(()=>callback(Error('Late IPC failure')));
+  assert.equal(supervisor.stopping,false);assert.equal(supervisor.backgroundFailure,null);assert.deepEqual(signals,[]);
+});
+
+test('asynchronous send failure promptly rejects matching waiters and stops the current worker gracefully', async () => {
+  const supervisor=new Supervisor('/unused-send-fixture');let callback;const signals=[];
+  supervisor.worker={id:'worker',attemptId:'attempt',exited:false,child:{connected:true,send(_message,done){callback=done;},kill(signal){signals.push(signal);}}};
+  const command=supervisor.command('prepare','boot-ready',1000),rejected=assert.rejects(command,/Worker IPC disconnected/);
+  assert.doesNotThrow(()=>callback(Error('IPC write failed')));await rejected;
+  assert.equal(supervisor.waiters.size,0);assert.equal(supervisor.stopping,true);assert.deepEqual(signals,['SIGTERM']);
+});
+
+async function activationWithoutAcknowledgement(home,releases,version){
+  await writeFile(join(releases.get(version).packageRoot,'dist/main.js'),`
+import {appendFileSync,writeFileSync,unlinkSync,existsSync} from 'node:fs';
+import {join} from 'node:path';
+const home=process.env.HSE_HARNESS_HOME,version=process.env.HSE_RELEASE_VERSION;
+const writer=join(home,'fixture.writer'),gate=join(home,version+'.operation-settled');
+let context,owned=false,settled=false,draining,mode='inactive';
+const event=type=>appendFileSync(join(home,'fixture.events'),JSON.stringify({type,version,pid:process.pid})+'\\n');
+const send=(message,type)=>{if(process.connected)process.send({...message,type,workerId:process.env.HSE_WORKER_ID,protocolVersion:1});};
+const stop=cause=>{event(owned&&!settled?'operation-aborted':cause);if(owned){unlinkSync(writer);owned=false;}process.exit(0);};
+process.on('SIGTERM',()=>stop('stop'));process.on('disconnect',()=>stop('disconnect'));
+process.on('message',message=>{
+  context=message;
+  if(message.type==='prepare'){event('prepare');send(message,'boot-ready');}
+  if(message.type==='activate'){
+    try{writeFileSync(writer,String(process.pid),{flag:'wx'});owned=true;}catch{event('overlap');process.exit(70);}
+    mode='active';event('accepted-operation'); // Admission opened; the activation ACK is deliberately lost.
+  }
+  if(message.type==='drain'){mode='draining';event('drain');draining=message;if(settled){mode='quiescent';send(message,'quiescent');}}
+  if(message.type==='resume'){draining=undefined;mode='active';event('resume');send(message,'active');}
+  if(message.type==='finish'){event(settled?'finished':'finish-before-settled');stop('finish-exit');}
+});
+setInterval(()=>{
+  if(owned&&!settled&&existsSync(gate)){
+    settled=true;event('operation-settled');
+    if(draining){mode='quiescent';send(draining,'quiescent');draining=undefined;}
+  }
+  if(context)send({...context,mode},'health');
+},10);
+event('spawn');
+`);
+}
+
+test('lost activation ACK cannot SIGTERM or abort an accepted candidate operation during rollback',async()=>{
+  await fixture(async({home,install,state,events,launch,releases})=>{
+    await activationWithoutAcknowledgement(home,releases,'0.3.0');
+    launch({bootMs:250,deferMs:40});await eventually(async()=>(await state()).runningVersion==='0.2.0');
+    await install('0.3.0');
+    await eventually(async()=>(await events()).some(event=>event.version==='0.3.0'&&event.type==='resume'));
+    const pending=await events();
+    assert.equal(pending.some(event=>event.version==='0.3.0'&&['operation-aborted','finished','finish-before-settled'].includes(event.type)),false);
+    assert.equal(pending.filter(event=>event.version==='0.2.0'&&event.type==='activate').length,1,'rollback cannot start another writer while candidate operation is accepted');
+    await writeFile(join(home,'0.3.0.operation-settled'),'ready');
+    await eventually(async()=>(await state()).phase==='rolled-back');
+    const trace=await events(),settled=trace.findIndex(event=>event.version==='0.3.0'&&event.type==='operation-settled'),finished=trace.findIndex(event=>event.version==='0.3.0'&&event.type==='finished');
+    assert.ok(settled>=0&&finished>settled);
+    assert.equal(trace.some(event=>event.type==='overlap'||event.type==='operation-aborted'||event.type==='finish-before-settled'),false);
+    assert.equal((await state()).active.version,'0.2.0');
+  });
+});
+
+test('initial recovery with a lost activation ACK retains the live accepted operation instead of treating it as inactive',async()=>{
+  await fixture(async({home,state,events,launch,releases})=>{
+    await activationWithoutAcknowledgement(home,releases,'0.2.0');
+    const supervisor=launch({bootMs:250});
+    await eventually(async()=>(await state()).phase==='blocked');
+    assert.equal(supervisor.worker.activationRequested,true);assert.equal(supervisor.worker.exited,false);
+    const trace=await events();assert.ok(trace.some(event=>event.type==='resume'));
+    assert.equal(trace.some(event=>['operation-aborted','finished','finish-before-settled'].includes(event.type)),false);
+    assert.ok(JSON.parse(await readFile(join(home,'runtime/supervisor.lock'),'utf8')).ownerId);
+    await writeFile(join(home,'0.2.0.operation-settled'),'ready');
+    await eventually(async()=>(await events()).some(event=>event.type==='operation-settled'));
   });
 });

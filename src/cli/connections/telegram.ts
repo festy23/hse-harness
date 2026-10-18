@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { TelegramClient } from 'teleproto';
-import { StringSession } from 'teleproto/sessions/index.js';
-import { Logger, LogLevel } from 'teleproto/extensions/Logger.js';
+import {createTelegramClient,telegramDeadline} from '../../telegram-client.js';
+import {Api,type TelegramClient} from 'teleproto';
+import {telegramDialogs,telegramInvoke} from '../../telegram-transport.js';
+import {budgets,withOperation,OperationError} from '../../operations.js';
 import type { UserAuthParams } from 'teleproto/client/auth.js';
 import { secret, secretsDir } from '../../config.js';
 import { writeSecret } from '../../store.js';
@@ -21,10 +22,13 @@ export interface TelegramSetupClient {
   getDialogs(options: { limit: undefined }): Promise<Dialog[]>;
   session: { save(): unknown };
   disconnect(): Promise<void>;
+  destroy?():Promise<void>;
+  invoke?:TelegramClient['invoke'];
 }
 export interface TelegramSetupDependencies {
   createClient?: (session: string, apiId: number, apiHash: string) => TelegramSetupClient;
   sessionPath?: string;
+  networkBudgetMs?:number;
 }
 
 function fail(error: unknown, message: string): never {
@@ -64,7 +68,30 @@ export async function bot(token: string, ui: SetupUI, request: typeof fetch = fe
 export async function telegram(ui: SetupUI, expectedOwnerId?: number, dependencies: TelegramSetupDependencies = {}): Promise<{ ownerId: number; chats: Choice[] }> {
   let client: TelegramSetupClient | undefined;
   let closing: Promise<void> | undefined;
-  const disconnect = () => closing ??= client?.disconnect().catch(() => undefined) ?? Promise.resolve();
+  const disconnect=()=>closing??=client?telegramDeadline(client.destroy?client.destroy():client.disconnect(),budgets.cleanup).catch(()=>{}):Promise.resolve();
+  // Legacy injected clients have no native cancellation. Closing stops their
+  // transport; joining the original SDK promise keeps auth rollback behind it.
+  const legacyRequest=async<T>(action:()=>Promise<T>,budgetMs:number,signal?:AbortSignal):Promise<T>=>{
+    if(signal?.aborted)throw new SetupCancelled();
+    let interrupted:Error|undefined,rejectCancellation!:(error:Error)=>void;
+    const cancellation=new Promise<never>((_,reject)=>{rejectCancellation=reject;});
+    const interrupt=(error:Error)=>{
+      if(interrupted)return;interrupted=error;
+      void disconnect().then(()=>rejectCancellation(error));
+    };
+    const cancel=()=>interrupt(new SetupCancelled());
+    signal?.addEventListener('abort',cancel,{once:true});
+    const timer=setTimeout(()=>interrupt(new OperationError('deadline','Telegram: запрос не завершился вовремя','request')),Math.min(budgetMs,dependencies.networkBudgetMs??Infinity));
+    const running=Promise.resolve().then(()=>{if(interrupted)throw interrupted;return action();});
+    try{
+      const result=await Promise.race([running,cancellation]);
+      if(interrupted)throw interrupted;
+      return result;
+    }catch(error){
+      await disconnect();await running.catch(()=>{});
+      throw interrupted??error;
+    }finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel);}
+  };
   try {
     const path = dependencies.sessionPath ?? join(secretsDir(), 'telegram.session');
     const existing = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
@@ -73,43 +100,43 @@ export async function telegram(ui: SetupUI, expectedOwnerId?: number, dependenci
     });
     const apiId = Number(secret('TELEGRAM_API_ID'));
     if (!Number.isSafeInteger(apiId) || apiId <= 0) throw new SetupIssue('Telegram API ID должен быть положительным числом');
-    const create = dependencies.createClient ?? ((session, id, hash) => {
-      const connection = new TelegramClient(new StringSession(session), id, hash, {
-        connectionRetries: 3, baseLogger: new Logger(LogLevel.NONE),
-      });
-      connection.setLogLevel(LogLevel.NONE);
-      return connection;
-    });
-    client = create(existing.trim(), apiId, secret('TELEGRAM_API_HASH'));
+    client = dependencies.createClient?.(existing.trim(), apiId, secret('TELEGRAM_API_HASH')) ?? await createTelegramClient(existing.trim());
     ui.note('Если Telegram-сессия уже сохранена, повторный код входа не потребуется.');
     // No progress animation here: the SDK can request interactive input during start().
-    await client.start({
-      phoneNumber: () => ui.input({ message: 'Номер Telegram с кодом страны' }),
-      phoneCode: () => ui.input({ message: 'Код Telegram', secret: true }),
-      password: () => ui.input({ message: 'Пароль Telegram 2FA', secret: true }),
-      onError: error => fail(error, 'Вход в Telegram не завершён. Проверь введённые данные и повтори шаг.'),
-    });
-    const ownerId = Number((await client.getMe()).id.toString());
+    let remaining=dependencies.networkBudgetMs??budgets.connect,armedAt=0,timer:NodeJS.Timeout|undefined;
+    let networkTimedOut=false;let expire!:(error:Error)=>void;
+    const expired=new Promise<never>((_,reject)=>{expire=reject;});
+    const pause=()=>{if(timer){clearTimeout(timer);remaining-=performance.now()-armedAt;timer=undefined;}};
+    const arm=()=>{if(networkTimedOut)return;armedAt=performance.now();timer=setTimeout(()=>{networkTimedOut=true;void disconnect().finally(()=>expire(new OperationError('deadline','Вход Telegram не завершился вовремя','operation')));},Math.max(1,remaining));};
+    const input=async(request:Parameters<SetupUI['input']>[0])=>{
+      if(networkTimedOut)throw new OperationError('deadline','Вход Telegram уже отменён по времени','operation');
+      pause();try{return await ui.input(request);}finally{if(!networkTimedOut)arm();}
+    };
+    arm();
+    const starting=Promise.resolve().then(()=>client!.start({
+        phoneNumber:()=>input({message:'Номер Telegram с кодом страны'}),
+        phoneCode:()=>input({message:'Код Telegram',secret:true}),
+        password:()=>input({message:'Пароль Telegram 2FA',secret:true}),
+        onError:error=>fail(error,'Вход в Telegram не завершён. Проверь введённые данные и повтори шаг.'),
+      }));
+    try{
+      await Promise.race([starting,expired]);
+      if(networkTimedOut){await disconnect();throw new OperationError('deadline','Вход Telegram не завершился вовремя','operation');}
+    }catch(error){await disconnect();await starting.catch(()=>{});throw error;}finally{pause();}
+    if(remaining<=0){await disconnect();throw new OperationError('deadline','Вход Telegram не завершился вовремя','operation');}
+    const account=client.invoke?await withOperation('connect',budgets.rpc,undefined,async op=>{
+      const users=await telegramInvoke(client as TelegramClient,new Api.users.GetUsers({id:[new Api.InputUserSelf()]}),op);
+      if(!(users[0] instanceof Api.User))throw new SetupIssue('Telegram не вернул владельца');return users[0];
+    }):await legacyRequest(()=>client!.getMe(),budgets.rpc);
+    const ownerId=Number(account.id.toString());
     if (!Number.isSafeInteger(ownerId) || ownerId <= 0) throw new SetupIssue('Telegram вернул некорректный ownerId');
     if (expectedOwnerId && expectedOwnerId !== ownerId) {
       throw new SetupIssue('Для другого владельца используй отдельную установку с отдельными data и secrets');
     }
     const dialogs = await ui.task('Получаю группы и каналы Telegram', async (signal?: AbortSignal) => {
       if (signal?.aborted) throw new SetupCancelled();
-      if (!signal) return client!.getDialogs({ limit: undefined });
-      let interrupt!: () => void;
-      const cancelled = new Promise<never>((_, reject) => {
-        interrupt = () => { void disconnect().then(() => reject(new SetupCancelled())); };
-      });
-      signal.addEventListener('abort', interrupt, { once: true });
-      try {
-        const result = await Promise.race([client!.getDialogs({ limit: undefined }), cancelled]);
-        if (signal.aborted) throw new SetupCancelled();
-        return result;
-      } catch (error) {
-        if (signal.aborted) throw new SetupCancelled();
-        throw error;
-      } finally { signal.removeEventListener('abort', interrupt); }
+      if(client!.invoke)return withOperation('connect',budgets.addChat,signal,async op=>telegramDialogs(client as TelegramClient,op)).catch(error=>{if(signal?.aborted)throw new SetupCancelled();throw error;});
+      return legacyRequest(()=>client!.getDialogs({limit:undefined}),budgets.addChat,signal);
     });
     const unique = new Map<string, Choice>();
     for (const dialog of dialogs) {

@@ -82,7 +82,7 @@ export class WorkerControl {
   private prepared = false;
   constructor(readonly lifecycle: WorkerLifecycle, readonly workerId: string,
     readonly actions: { prepare(): Promise<void>; activate(): Promise<void>; checkpoint(): Promise<void>;
-      finish(): Promise<void>; notice(text: string, id: string): Promise<void>; health(): unknown },
+      finish(): Promise<void>; notice(text: string, id: string): Promise<void>; health(): unknown;transition?(mode:WorkerMode):void },
     readonly send: (message: Record<string, unknown>) => void) {}
   private reply(command: WorkerCommand, type: string, extra: Record<string, unknown> = {}): void {
     if (this.latest !== command) return;
@@ -97,10 +97,10 @@ export class WorkerControl {
     // cannot invalidate a drain's sequence or manufacture a quiescent ACK.
     if(c.type==='notice'){
       if(typeof c.text!=='string'||c.text.length>8000||typeof c.id!=='string'||c.id.length>200||!this.lifecycle.accepting)return;
-      await this.lifecycle.run(async()=>{
+      try{await this.lifecycle.run(async()=>{
         await this.actions.notice(c.text!,c.id!);
         this.send({protocolVersion:1,attemptId:c.attemptId,workerId:this.workerId,sequence:c.sequence,type:'notice-sent',id:c.id});
-      });
+      });}catch{this.fatal('state-invariant','Worker notice persistence failed');throw new Error('Worker notice persistence failed');}
       return;
     }
     if (this.latest && c.sequence <= this.latest.sequence) {
@@ -114,16 +114,18 @@ export class WorkerControl {
         if (this.prepared || this.lifecycle.mode !== 'inactive') throw new Error('Prepare is only valid before activation');
         await this.actions.prepare(); this.prepared = true; this.reply(c, 'boot-ready');
         this.heartbeat = setInterval(() => {
+          try{
           const current = this.latest;
           if (current) this.send({ protocolVersion: 1, attemptId: current.attemptId, workerId: this.workerId,
             sequence: current.sequence, type: 'health', mode: this.lifecycle.mode, inFlight: this.lifecycle.inFlight,
             version: process.env.HSE_RELEASE_VERSION, health: this.actions.health() });
+          }catch{this.fatal('state-invariant','Worker health callback failed');}
         }, 5000);
       } else if (c.type === 'activate') {
         if (!this.prepared || this.lifecycle.mode !== 'inactive') throw new Error('Invalid activation');
-        this.lifecycle.activate(); await this.actions.activate(); this.reply(c, 'active');
+        this.lifecycle.activate();this.actions.transition?.('active'); await this.actions.activate(); this.reply(c, 'active');
       } else if (c.type === 'drain') {
-        this.lifecycle.drain(); this.reply(c, 'draining');
+        this.lifecycle.drain();this.actions.transition?.('draining'); this.reply(c, 'draining');
         await this.lifecycle.idle(()=>this.latest===c&&this.lifecycle.mode==='draining');
         if (this.latest !== c || this.lifecycle.mode !== 'draining') return;
         await this.actions.checkpoint();
@@ -131,12 +133,13 @@ export class WorkerControl {
         this.lifecycle.quiescent(); this.reply(c, 'quiescent');
       } else if (c.type === 'resume') {
         if (!['draining','quiescent'].includes(this.lifecycle.mode)) throw new Error('Invalid resume');
-        this.lifecycle.activate(); this.reply(c, 'active');
+        this.lifecycle.activate();this.actions.transition?.('active'); this.reply(c, 'active');
       } else if (c.type === 'finish') {
         this.lifecycle.finish(); this.reply(c, 'exiting'); this.close(); await this.actions.finish();
       }
-    } catch {
+    } catch(error) {
       this.reply(c, c.type === 'prepare' ? 'boot-failed' : 'fatal', { code: 'state-invariant', detail: 'Worker lifecycle or checkpoint failed' });
+      throw error;
     }
   }
   close(): void { if (this.heartbeat) clearInterval(this.heartbeat); }

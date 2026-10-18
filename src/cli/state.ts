@@ -1,6 +1,7 @@
 import { readFile, mkdir, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { writeSecret } from '../store.js';
+import { withConfigWriteLock } from '../config-file.js';
 import { calendarSettings, type Config, type StudyProfile, type CalendarSelection } from '../config.js';
 import { SetupIssue } from './errors.js';
 
@@ -42,7 +43,7 @@ export function normalizeSetupConfig(value: unknown): SetupConfig {
   catch (error) { throw new SetupIssue(`Календари: ${(error as Error).message}`); }
   const config: Record<string, unknown> = { ownerId: 0, chats: [], folders: [], model: '', pollSeconds: 60, ...raw, ...calendars };
   if (!Number.isSafeInteger(config.ownerId) || Number(config.ownerId) < 0) throw new SetupIssue('ownerId должен быть неотрицательным целым числом');
-  if (!Array.isArray(config.chats) || config.chats.some(c => !c || typeof c.id !== 'string' || !/^-?\d+$/.test(c.id) || typeof c.title !== 'string')) {
+  if (!Array.isArray(config.chats) || config.chats.some(c => !c || typeof c.id !== 'string' || !/^-?\d+$/.test(c.id) || typeof c.title !== 'string' || (c.allowQuestions!==undefined&&typeof c.allowQuestions!=='boolean'))) {
     throw new SetupIssue('chats должен быть списком объектов с числовым id и названием title');
   }
   if (!Array.isArray(config.folders) || config.folders.some(f => typeof f !== 'string')) throw new SetupIssue('folders должен быть списком названий папок');
@@ -150,6 +151,10 @@ export class SetupState {
   }
 
   private async commit(changes: Map<string, string>): Promise<void> {
+    await withConfigWriteLock(this.configPath,()=>this.commitLocked(changes));
+  }
+
+  private async commitLocked(changes: Map<string, string>): Promise<void> {
     const validated = normalizeSetupConfig(this.config);
     if (await optionalFile(this.configPath) !== this.version) {
       throw new SetupIssue('Настройки изменились в другом окне. Перезапусти CLI, чтобы загрузить актуальные данные');

@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { ReleaseStore } from './releases.mjs';
 import { atomicJSON, readJSON, acquireLock } from './storage.mjs';
 
-export const SUPERVISOR_VERSION = '1.0.0';
+export const SUPERVISOR_VERSION = '1.0.1';
 export const PROTOCOL_VERSION = 1;
 const packageName = '@ivan-boss/hse-harness';
 const stable = value => typeof value === 'string' && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
@@ -64,6 +64,8 @@ export class Supervisor {
     this.retryCount = 0;
     this.notices = [];
     this.saves = Promise.resolve();
+    this.preparation = null;
+    this.backgroundFailure = null;
   }
 
   async save() {
@@ -109,13 +111,24 @@ export class Supervisor {
   }
 
   send(type, extra = {}) {
-    if (!this.worker || this.worker.exited || !this.worker.child.connected) return;
-    const envelope = { protocolVersion: PROTOCOL_VERSION, attemptId: this.worker.attemptId,
-      workerId: this.worker.id, sequence: ++this.sequence, type, ...extra };
-    this.worker.child.send(envelope, error => {
-      if (error && !this.worker?.exited) this.options.log?.('IPC disconnected');
-    });
+    const worker = this.worker;
+    if (!worker || worker.exited || !worker.child.connected) return;
+    const envelope = { protocolVersion: PROTOCOL_VERSION, attemptId: worker.attemptId,
+      workerId: worker.id, sequence: ++this.sequence, type, ...extra };
+    const failed = () => {
+      if (worker.exited || this.worker !== worker) return;
+      const error = new Error('Worker IPC disconnected');
+      for (const waiter of this.waiters) if (waiter.worker === worker) waiter.reject(error);
+      this.failBackground(error);
+    };
+    try { worker.child.send(envelope, error => { if (error) failed(); }); }
+    catch { failed(); return; }
     return envelope;
+  }
+
+  failBackground(error) {
+    this.backgroundFailure ??= error;
+    this.requestStop();
   }
 
   async command(type, response, timeout, extra = {}) {
@@ -159,7 +172,7 @@ export class Supervisor {
       });
     });
     worker.child.on('message', value => {
-      if (this.worker !== worker || !value || value.workerId !== worker.id ||
+      if (this.worker !== worker || worker.exited || !value || value.workerId !== worker.id ||
           value.protocolVersion !== PROTOCOL_VERSION || JSON.stringify(value).length > 65536) return;
       if (value.type === 'health') {
         this.lastHeartbeat = this.clock();
@@ -172,7 +185,7 @@ export class Supervisor {
       }
       if (value.type === 'notice-sent') {
         this.state.notices = (this.state.notices ?? []).filter(n => n.id !== value.id);
-        void this.save().catch(error => { this.blocked = true; this.options.log?.(detail(error)); });
+        void this.save().catch(error => this.failBackground(error));
         return;
       }
       for (const waiter of this.waiters) {
@@ -185,6 +198,9 @@ export class Supervisor {
     if (this.stopping || shouldActivate && !await shouldActivate()) {
       throw Object.assign(new Error('Автоматическое применение отключено во время переключения'), { code: 'UPDATE_CANCELLED' });
     }
+    // An ACK can be lost after the worker has opened root admission. From this
+    // point only proven quiescence permits update-driven teardown.
+    worker.activationRequested = true;
     await this.command('activate', 'active', this.bootMs);
     worker.mode = 'active';
     this.lastHeartbeat = this.clock();
@@ -202,13 +218,24 @@ export class Supervisor {
 
   async stopInactive() {
     const worker = this.worker;
-    if (!worker || worker.exited) return;
-    // No activation was acknowledged: still request normal shutdown first. Never assume active work is safe to kill.
+    if (!worker || worker.exited) return true;
+    if (worker.activationRequested) {
+      if (worker.mode !== 'exiting') {
+        if (worker.mode !== 'quiescent' && !await this.drain()) return false;
+        await this.finishWorker();
+      } else if (!await this.waitExit(worker, this.finishMs)) {
+        this.blocked = true;
+        throw new Error('Не подтверждён выход активированного кандидата; второй worker запрещён');
+      }
+      return true;
+    }
+    // Activation was never requested, so admission could not have opened.
     worker.child.kill('SIGTERM');
     if (!await this.waitExit(worker, this.finishMs)) {
       this.blocked = true;
       throw new Error('Не подтверждён выход кандидата; второй worker запрещён');
     }
+    return true;
   }
 
   async drain() {
@@ -292,7 +319,7 @@ export class Supervisor {
     if (this.worker && !this.worker.exited) {
       if (this.worker.mode === 'active' && !await this.drain()) return;
       if (this.worker.mode === 'quiescent') await this.finishWorker();
-      else if (!this.worker.exited) await this.stopInactive();
+      else if (!this.worker.exited && !await this.stopInactive()) return;
     }
     if (this.stopping) return;
     await this.releaseStore.validate(attempt.from);
@@ -310,7 +337,7 @@ export class Supervisor {
         return;
       } catch (e) {
         attempt.failure = detail(e);
-        await this.stopInactive();
+        if (!await this.stopInactive()) return;
         await sleep((this.options.retryMs ?? [10_000, 30_000, 60_000])[attempt.rollbackStartCount - 1], this.stopController.signal);
       }
     }
@@ -355,16 +382,44 @@ export class Supervisor {
     }
   }
 
+  beginPreparation(version) {
+    if (this.preparation || this.stopping) return;
+    const preparation = { version, controller: new AbortController(), status: 'pending', cancelled: false };
+    this.preparation = preparation;
+    // Settlement only records an outcome. The monitoring loop is the sole owner
+    // of journals and handoffs, including when a worker dies during an install.
+    preparation.completion = Promise.resolve().then(() => {
+      if (preparation.controller.signal.aborted) throw new Error('Preparation cancelled');
+      return this.releaseStore.prepare(version, { signal: preparation.controller.signal });
+    }).then(target => { preparation.target = target; preparation.status = 'ready'; },
+      error => { preparation.error = error; preparation.status = 'failed'; });
+  }
+
+  cancelPreparation() {
+    if (!this.preparation) return;
+    this.preparation.cancelled = true;
+    this.preparation.controller.abort();
+  }
+
   async tick() {
     const settings = await this.settings();
     this.state.updatesEnabled = settings.enabled !== false;
     this.state.installedVersion = await this.installed() ?? null;
+    const requestPending = settings.request && settings.request.id !== this.state.lastRequestId;
+    if (this.preparation && (!settings.enabled || this.state.installedVersion !== this.preparation.version || requestPending || this.stopping))
+      this.cancelPreparation();
+    if (this.preparation?.cancelled && this.preparation.status !== 'pending') {
+      this.preparation = null;
+      this.state.pendingVersion = null;
+      if (!this.blocked && !this.state.attempt) this.state.phase = 'idle';
+    }
     if (this.worker && !this.worker.exited && this.clock() - this.lastHeartbeat > this.heartbeatMs) {
       this.blocked = true; this.state.phase = 'blocked'; this.state.deferredReason = 'Worker не отвечает; второй экземпляр не запущен';
       await this.save();
       // A retry request is processed below, but cannot authorize a second writer.
     }
-    if (settings.request && settings.request.id !== this.state.lastRequestId) {
+    // Wait for cancelled installer cleanup without suspending worker monitoring.
+    if (requestPending && !this.preparation) {
       if (settings.request.action === 'retry') {
         this.state.lastRequestId = settings.request.id;
         if (this.state.manualHold?.version === this.state.installedVersion) this.state.manualHold = null;
@@ -452,8 +507,17 @@ export class Supervisor {
     }
     if ((this.state.manualHold?.version === version) || this.state.quarantine?.some(q => q.version === version)) { await this.save(); return; }
     try {
-      this.state.phase = 'preparing'; this.state.pendingVersion = version; await this.save();
-      const target = await this.releaseStore.prepare(version, { signal: this.stopController.signal });
+      if (!this.preparation) {
+        this.state.phase = 'preparing'; this.state.pendingVersion = version; await this.save();
+        this.beginPreparation(version);
+        return;
+      }
+      if (this.preparation.status === 'pending') { await this.save(); return; }
+      const preparation = this.preparation;
+      this.preparation = null;
+      if (preparation.cancelled) return;
+      if (preparation.status === 'failed') throw preparation.error;
+      const target = preparation.target;
       if (this.stopping || !(await this.settings()).enabled || await this.installed() !== version) { this.state.phase = 'idle'; await this.save(); return; }
       if (!compatible(this.state.active, target)) throw new Error('Выпуск требует обслуживаемого обновления формата или supervisor');
       if (this.state.manualHold && version !== this.state.manualHold.version) this.state.manualHold = null;
@@ -472,6 +536,7 @@ export class Supervisor {
     if (this.stopping) return;
     this.stopping = true;
     this.stopController.abort();
+    this.cancelPreparation();
     if (this.worker && !this.worker.exited) this.worker.child.kill('SIGTERM');
   }
 
@@ -487,16 +552,23 @@ export class Supervisor {
       this.retryCount = this.state.preparationRetryCount ?? 0;
       this.state.supervisorOwnerId = unlock.identity.ownerId;
       this.releaseStore ??= new ReleaseStore(this.home, { ...this.options, node: this.node, npm: this.state.installation.npm });
+      // Preparation promises are process-local; an interrupted install is safely
+      // revalidated/reprepared, never reconstructed from a descriptive phase.
+      if (!this.state.attempt && this.state.phase === 'preparing') {
+        this.state.phase = 'idle'; this.state.pendingVersion = null;
+      }
       await this.recover();
       while (!this.stopping) {
         try { await this.tick(); } catch (error) { this.blocked = true; this.state.phase = 'blocked'; this.state.deferredReason = detail(error); await this.save(); }
         await sleep(this.pollMs, this.stopController.signal);
       }
+      if (this.backgroundFailure) throw this.backgroundFailure;
       if (this.worker && !await this.waitExit(this.worker, this.finishMs)) {
         // Do not leave a stale unlock that invites another writer.
         throw new Error('Worker ещё завершает остановку; runtime lock сохранён до выхода');
       }
       this.state.supervisorPid = null; this.state.runningVersion = null; await this.save();
+      if (this.backgroundFailure) throw this.backgroundFailure;
     } catch (error) {
       // A rejected durable write must not leave a connected child keeping the
       // launcher alive after monitoring and its signal handlers have ended.
@@ -509,8 +581,10 @@ export class Supervisor {
         // active operation. Remain its guardian until its actual exit.
         await worker.exit;
       }
-      throw error;
+      throw this.backgroundFailure ?? error;
     } finally {
+      this.cancelPreparation();
+      await this.preparation?.completion;
       process.off('SIGINT', stop); process.off('SIGTERM', stop);
       if (!this.worker || this.worker.exited) await unlock();
     }

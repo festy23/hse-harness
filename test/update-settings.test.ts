@@ -1,0 +1,30 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {updateRuntime} from '../src/updates/runtime.js';
+import {updateSettings} from '../runtime/installation.mjs';
+
+test('automatic policy defaults off, persists across runtime recreation and preserves other settings',async t=>{
+  const home=await mkdtemp(join(tmpdir(),'hse-update-settings-'));t.after(()=>rm(home,{recursive:true,force:true}));
+  const manifestPath=join(home,'package.json');await mkdir(join(home,'runtime'));
+  await writeFile(manifestPath,JSON.stringify({version:'0.3.0'}));
+  await writeFile(join(home,'runtime/state.json'),JSON.stringify({installation:{manifestPath},active:{version:'0.3.0'},runningVersion:'0.3.0'}));
+  await writeFile(join(home,'runtime/settings.json'),JSON.stringify({enabled:true,request:{id:'keep',action:'retry'}}));
+  let runtime=updateRuntime(home,true);
+  assert.equal((await runtime.snapshot())!.automaticUpdates,false,'legacy enabled is not automatic consent');
+  await runtime.setAutomatic(true);runtime=updateRuntime(home,true);
+  assert.equal((await runtime.snapshot())!.automaticUpdates,true);
+  assert.deepEqual(JSON.parse(await readFile(join(home,'runtime/settings.json'),'utf8')).request,{id:'keep',action:'retry'});
+  await runtime.setAutomatic(false);runtime=updateRuntime(home,true);
+  assert.equal((await runtime.snapshot())!.automaticUpdates,false);
+  assert.equal((await runtime.snapshot())!.updatesEnabled,true,'manual application remains available');
+  await runtime.setAutomatic(true);await updateSettings(home,{enabled:false});
+  assert.equal((await runtime.snapshot())!.automaticUpdates,false,'CLI disable revokes automatic discovery/install');
+  await updateSettings(home,{enabled:true});assert.equal((await runtime.snapshot())!.automaticUpdates,false);
+  await writeFile(manifestPath,'{"version":');
+  assert.equal((await runtime.snapshot())!.installedVersion,'0.3.0','an interrupted npm extraction does not break the settings screen');
+  await runtime.setAutomatic(true);assert.equal((await runtime.snapshot())!.automaticUpdates,true);
+  await assert.rejects(updateRuntime(home,false).setAutomatic(false),/Managed runtime/);
+});

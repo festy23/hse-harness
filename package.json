@@ -59,6 +59,7 @@
     "eval": "tsx src/evaluate.ts",
     "test:runtime": "node --test test/release-store.test.mjs test/update-supervisor.test.mjs test/runtime-installation.test.mjs test/telegram-update-runtime.test.mjs",
     "test:e2e:managed": "npm run build && node test/e2e/run.mjs --calendar=icloud --managed",
+    "test:e2e:updates": "npm run build && node test/e2e/updates.mjs",
     "test:updates": "npm run build && node scripts/prepare-bundle.mjs && node scripts/create-runtime-manifest.mjs && node --test test/npm-update.integration.test.mjs",
     "pretest": "npm run build",
     "benchmark:async": "node scripts/benchmark-async.mjs"

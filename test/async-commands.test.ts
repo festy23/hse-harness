@@ -21,7 +21,11 @@ function gate() {
   });
   return { promise, release };
 }
-function fixture(handle: (u: BotUpdate) => Promise<void>, slowCapacity = 32) {
+function fixture(
+  handle: (u: BotUpdate) => Promise<void>,
+  slowCapacity = 32,
+  answerCallback?: (id: string) => Promise<void>,
+) {
   const lifecycle = new WorkerLifecycle();
   lifecycle.activate();
   const offsets: number[] = [];
@@ -37,6 +41,7 @@ function fixture(handle: (u: BotUpdate) => Promise<void>, slowCapacity = 32) {
       throw e;
     },
     slowCapacity,
+    answerCallback,
   });
   const update = (id: number, fast = false): BotUpdate => ({
     update_id: id,
@@ -150,6 +155,81 @@ test('failed durable handler prevents future acknowledgement instead of becoming
     (e) => e === error,
   );
   assert.equal(f.store.state.botOffset, 0);
+});
+function callback(id: number): BotUpdate {
+  return {
+    update_id: id,
+    callback_query: {
+      id: `callback-${id}`,
+      from: { id: 1 },
+      message: { chat: { id: 1, type: 'private' } },
+      data: 'approve:draft',
+    },
+  };
+}
+test('callback answers bypass a saturated slow lane without reordering actions or repeated answers', async () => {
+  const slow = gate(),
+    actions: number[] = [],
+    answered: string[] = [];
+  const f = fixture(
+    async (u) => {
+      if (u.update_id === 1) {
+        await slow.promise;
+      }
+      actions.push(u.update_id);
+    },
+    1,
+    async (id) => {
+      answered.push(id);
+    },
+  );
+  try {
+    f.coordinator.observe([f.update(1), callback(2), callback(3)]);
+    await turn();
+    f.coordinator.observe([f.update(1), callback(2), callback(3)]);
+    await turn();
+    await f.coordinator.advance();
+    assert.deepEqual(answered, ['callback-2', 'callback-3']);
+    assert.deepEqual(actions, []);
+    assert.equal(f.store.state.botOffset, 0);
+  } finally {
+    slow.release();
+    await f.coordinator.idle();
+  }
+  await f.coordinator.advance();
+  assert.deepEqual(actions, [1, 2, 3]);
+  assert.equal(f.store.state.botOffset, 4);
+});
+test('callback answer work is bounded and tracked during drain even after action completion', async () => {
+  const held = gate(),
+    answered: string[] = [];
+  const f = fixture(
+    async () => {},
+    32,
+    async (id) => {
+      answered.push(id);
+      await held.promise;
+    },
+  );
+  f.coordinator.observe(Array.from({ length: 100 }, (_, i) => callback(i + 1)));
+  await turn();
+  f.lifecycle.drain();
+  try {
+    assert.equal(answered.length, 4);
+    assert.equal(f.lifecycle.inFlight, 4);
+    await f.coordinator.advance();
+    assert.equal(f.store.state.botOffset, 0);
+    assert.equal(f.coordinator.status().observed, 100);
+  } finally {
+    held.release();
+    await f.coordinator.idle();
+    f.lifecycle.activate();
+    f.coordinator.observe([]);
+    await f.coordinator.idle();
+  }
+  await f.coordinator.advance();
+  assert.equal(answered.length, 100);
+  assert.equal(f.store.state.botOffset, 101);
 });
 test('deadline cancels real work but waits its cleanup before resolving the operation', async () => {
   const closing = gate();

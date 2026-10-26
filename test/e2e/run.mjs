@@ -24,6 +24,7 @@ const state = {
   now: Date.parse('2026-10-04T09:00:00Z'),
   updates: [],
   notifications: [],
+  callbackAnswers: [],
   group: [],
   calendar: new Map(),
   schedule: {
@@ -49,6 +50,7 @@ const tasks = new Map();
 const groupAttempts = [];
 const successfulTurns = [];
 let releaseModel;
+let calendarHold;
 const protocolEvents = [];
 const base = (id, title, deadlines) => ({
   id,
@@ -226,6 +228,13 @@ const server = createServer(async (req, res) => {
       res.statusCode = status;
       res.end(JSON.stringify(data));
     };
+    if (
+      calendarHold &&
+      (url.pathname.startsWith('/icloud') || url.pathname.startsWith('/google/'))
+    ) {
+      state.calendarHeld = true;
+      await calendarHold;
+    }
     if (url.pathname.startsWith('/icloud')) {
       if (state.calendarDown || (state.calendarObjectsDown && req.method === 'REPORT')) {
         return send({}, 503);
@@ -247,6 +256,7 @@ const server = createServer(async (req, res) => {
       return send({ ok: true, result: { message_id: state.notifications.length } });
     }
     if (url.pathname === '/bot/answerCallbackQuery') {
+      state.callbackAnswers.push(body.callback_query_id);
       return send({ ok: true, result: true });
     }
     if (url.pathname === '/tg/history') {
@@ -555,6 +565,7 @@ function callback(data, from = 123, chat = 123) {
       data,
     },
   });
+  return String(state.nextUpdate);
 }
 const texts = () => state.notifications.map((n) => n.text);
 const taskEvents = () =>
@@ -790,11 +801,32 @@ try {
         );
         const approve = draft.reply_markup.inline_keyboard[0][0].callback_data;
         assert.equal(state.group.length, 0);
-        callback(approve, 456);
-        callback(approve, 123, -100123);
-        await pause(250);
+        const unauthorized = [callback(approve, 456), callback(approve, 123, -100123)];
+        await until(
+          () => unauthorized.every((id) => state.callbackAnswers.includes(id)),
+          'unauthorized callbacks answered',
+        );
         assert.equal(state.group.length, 0);
-        callback(approve);
+        let releaseCalendar;
+        calendarHold = new Promise((resolve) => {
+          releaseCalendar = resolve;
+        });
+        state.calendarHeld = false;
+        let approved;
+        try {
+          bot('/tasks');
+          approved = callback(approve);
+          await until(
+            () => state.calendarHeld && state.callbackAnswers.includes(approved),
+            'approval callback answered while task listing is held',
+          );
+          assert.equal(state.group.length, 0);
+          await pause(250);
+          assert.equal(state.callbackAnswers.filter((id) => id === approved).length, 1);
+        } finally {
+          calendarHold = undefined;
+          releaseCalendar();
+        }
         callback(approve);
         await until(() => state.group.length === 1, 'approved question');
         await pause(250);

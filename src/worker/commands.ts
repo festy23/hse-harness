@@ -7,11 +7,13 @@ interface Entry {
   update: BotUpdate;
   state: 'waiting' | 'running' | 'done';
   retryAt: number;
+  callback: 'waiting' | 'running' | 'done';
 }
 
 export class CommandCoordinator {
   private readonly entries = new Map<number, Entry>();
   private readonly jobs = new Set<Promise<void>>();
+  private callbacks = 0;
   private fast = 0;
   private slow = 0;
   private tail: Promise<void> = Promise.resolve();
@@ -25,6 +27,7 @@ export class CommandCoordinator {
       onError: (error: unknown) => Promise<void>;
       fastConcurrency?: number;
       slowCapacity?: number;
+      answerCallback?: (id: string) => Promise<void>;
       retryMs?: number;
     },
   ) {}
@@ -37,17 +40,52 @@ export class CommandCoordinator {
       if (this.entries.size >= 100) {
         break;
       }
-      this.entries.set(update.update_id, { update, state: 'waiting', retryAt: 0 });
+      this.entries.set(update.update_id, {
+        update,
+        state: 'waiting',
+        retryAt: 0,
+        callback: update.callback_query && this.options.answerCallback ? 'waiting' : 'done',
+      });
     }
     this.pump();
   }
   private ordered(): Entry[] {
     return [...this.entries.values()].sort((a, b) => a.update.update_id - b.update.update_id);
   }
+  private answerCallbacks(): void {
+    for (const entry of this.ordered()) {
+      if (this.callbacks >= 4) {
+        break;
+      }
+      if (entry.callback !== 'waiting') {
+        continue;
+      }
+      entry.callback = 'running';
+      this.callbacks++;
+      const job = this.lifecycle
+        .run(async () => {
+          await this.options.answerCallback!(entry.update.callback_query!.id);
+        })
+        .then(
+          () => {},
+          (error) => {
+            this.failure = error;
+          },
+        )
+        .finally(() => {
+          entry.callback = 'done';
+          this.callbacks--;
+          this.jobs.delete(job);
+          this.pump();
+        });
+      this.jobs.add(job);
+    }
+  }
   private pump(): void {
     if (!this.lifecycle.accepting || this.failure) {
       return;
     }
+    this.answerCallbacks();
     for (const entry of this.ordered()) {
       if (entry.state !== 'waiting' || entry.retryAt > Date.now()) {
         continue;
@@ -112,7 +150,7 @@ export class CommandCoordinator {
     this.check();
     const completed: Entry[] = [];
     for (const entry of this.ordered()) {
-      if (entry.state !== 'done') {
+      if (entry.state !== 'done' || entry.callback !== 'done') {
         break;
       }
       completed.push(entry);

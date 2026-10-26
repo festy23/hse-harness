@@ -42,7 +42,7 @@ ICloudAccount.prototype.collection=async function(id){return {identity:id,list:a
 let first=true;
 globalThis.fetch=async(input,options)=>{
  const method=new URL(input).pathname.split('/').at(-1),args=JSON.parse(options.body);
- if(method==='getUpdates'){if(first){first=false;await new Promise(r=>setTimeout(r,300));}const result=['/tasks','/status','/start','/help'].map((text,i)=>({update_id:i+1,message:{message_id:i+1,chat:{id:1,type:'private'},from:{id:1},text}})).filter(x=>x.update_id>=args.offset);return Response.json({ok:true,result});}
+ if(method==='getUpdates'){if(first){first=false;await new Promise(r=>setTimeout(r,300));}const result=['/tasks','/status','/start','/help',undefined].map((text,i)=>({update_id:i+1,message:{message_id:i+1,chat:{id:1,type:'private'},from:{id:1},text}})).filter(x=>x.update_id>=args.offset);return Response.json({ok:true,result});}
  if(method==='sendMessage'){await appendFile(${JSON.stringify(join(dir, 'sent.jsonl'))},JSON.stringify(args.text)+'\\n');return Response.json({ok:true,result:{message_id:1}});}
  throw new Error('Unexpected Bot API method');
 };`;
@@ -78,7 +78,7 @@ globalThis.fetch=async(input,options)=>{
         state = await readFile(join(dir, 'data/operations.json'), 'utf8')
           .then(JSON.parse)
           .catch(() => undefined);
-        if (state?.botOffset === 5 && state.health['Бот'] === 'ok') {
+        if (state?.botOffset === 6 && state.health['Бот'] === 'ok') {
           break;
         }
         await new Promise((r) => {
@@ -86,7 +86,7 @@ globalThis.fetch=async(input,options)=>{
         });
       }
       assert.ok(state);
-      assert.equal(state.botOffset, 5, 'failed /tasks blocked later commands: ' + output);
+      assert.equal(state.botOffset, 6, 'failed /tasks blocked later commands: ' + output);
       assert.equal(state.health['Бот'], 'ok');
       assert.ok(
         [...Object.keys(state.notices), ...Object.keys(state.outbox)].some((key) =>
@@ -101,6 +101,7 @@ globalThis.fetch=async(input,options)=>{
       assert.ok(sent.some((x) => x.includes('список работ') && x.includes('недоступен')));
       assert.ok(sent.some((x) => x.startsWith('{') && x.includes('"health"')));
       assert.ok(sent.some((x) => x.includes('основной личный диалог')));
+      assert.ok(sent.some((x) => x.includes('только текст')));
       const help = sent.find((x) => x.startsWith('Команды учебного помощника:'))!;
       for (const command of ['start', 'help', 'tasks', 'status', 'updates', 'ready']) {
         assert.ok(help?.includes(`/${command} — `));

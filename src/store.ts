@@ -57,11 +57,13 @@ export interface State {
   sessionPath?: string;
   botOffset: number;
   botIdentity?: string;
+  botRetryAt?: number;
   cursors: Record<string, string>;
   queue: {
     id: string;
     sources: Source[];
     ownerText?: string;
+    forwarded?: boolean;
     digest?: string;
     phase?: 'prompting' | 'answer';
     answer?: string;
@@ -205,6 +207,9 @@ export class Store {
       ) {
         throw new Error('Invalid bot identity');
       }
+      if (s.botRetryAt !== undefined && (!Number.isSafeInteger(s.botRetryAt) || s.botRetryAt < 0)) {
+        throw new Error('Invalid bot retry deadline');
+      }
       for (const field of [
         'cursors',
         'seen',
@@ -230,6 +235,7 @@ export class Store {
             !item ||
             typeof item.id !== 'string' ||
             !Array.isArray(item.sources) ||
+            (item.forwarded !== undefined && typeof item.forwarded !== 'boolean') ||
             (item.phase !== undefined && !['prompting', 'answer'].includes(item.phase)) ||
             (item.answer !== undefined && typeof item.answer !== 'string'),
         )
@@ -418,6 +424,7 @@ export class Store {
     } else {
       this.state.botOffset = 0;
     }
+    delete this.state.botRetryAt;
     this.state.botIdentity = identity;
     await this.save();
   }
@@ -425,13 +432,19 @@ export class Store {
     ownerText: string,
     updateId?: number,
     identity = this.state.botIdentity,
+    forwarded = false,
   ): Promise<void> {
     const key =
       updateId === undefined ? undefined : identity ? `${identity}:${updateId}` : String(updateId);
     if (key && this.state.ownerUpdates[key]) {
       return;
     }
-    this.state.queue.push({ id: key ? `owner:${key}` : randomUUID(), sources: [], ownerText });
+    this.state.queue.push({
+      id: key ? `owner:${key}` : randomUUID(),
+      sources: [],
+      ownerText,
+      ...(forwarded ? { forwarded: true } : {}),
+    });
     if (key) {
       this.state.ownerUpdates[key] = true;
     }

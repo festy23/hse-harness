@@ -50,9 +50,9 @@
     "prepack": "node scripts/prepare-bundle.mjs && npm run build && node scripts/create-runtime-manifest.mjs && node scripts/verify-package.mjs",
     "prepublishOnly": "npm run check && npm run test:e2e",
     "test:package": "npm run build && node scripts/prepare-bundle.mjs && node scripts/create-runtime-manifest.mjs && node --test test/package.test.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "node --import tsx --test test/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run test:runtime",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm run test:quality && npm test && npm run test:runtime",
     "test:e2e": "npm run build && node test/e2e/run.mjs --calendar=icloud && node test/e2e/run.mjs --calendar=google && node test/e2e/run.mjs --calendar=yandex && node test/e2e/run.mjs --calendar=icloud --startup-pending",
     "setup": "tsx src/setup.ts",
     "harness": "node scripts/harness.mjs",
@@ -61,7 +61,12 @@
     "test:e2e:managed": "npm run build && node test/e2e/run.mjs --calendar=icloud --managed",
     "test:updates": "npm run build && node scripts/prepare-bundle.mjs && node scripts/create-runtime-manifest.mjs && node --test test/npm-update.integration.test.mjs",
     "pretest": "npm run build",
-    "benchmark:async": "node scripts/benchmark-async.mjs"
+    "benchmark:async": "node scripts/benchmark-async.mjs",
+    "lint": "node scripts/code-policy.mjs && oxlint src test runtime scripts deploy bin",
+    "lint:fix": "oxlint --fix src test runtime scripts deploy bin",
+    "format": "oxfmt --write src test runtime scripts deploy bin",
+    "format:check": "oxfmt --check src test runtime scripts deploy bin",
+    "test:quality": "node --test test/code-policy.test.mjs"
   },
   "dependencies": {
     "@clack/prompts": "1.8.1",
@@ -81,6 +86,11 @@
   "devDependencies": {
     "@types/html-to-text": "9.0.4",
     "@types/node": "26.6.4",
+    "@types/ws": "8.18.2",
+    "oxc-parser": "0.155.0",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
+    "oxlint-tsgolint": "7.0.2005",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
   },

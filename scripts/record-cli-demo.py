@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Record the real CLI in an isolated POSIX terminal and render its ANSI output to GIF.
 
-Requires Python 3, Pillow and pyte. No account login or external service is used.
-"""
+
+
+
 import codecs
 import fcntl
 import json
@@ -30,7 +30,7 @@ START = time.monotonic()
 
 
 class EmojiScreen(pyte.Screen):
-    """Keep emoji variation selectors from dropping the rest of a pyte text run."""
+
     def draw(self, data):
         for char in data:
             if char == '\ufe0f' and self.cursor.x:
@@ -52,7 +52,7 @@ class Terminal:
     def __init__(self, root):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLUMNS, 0, 0))
-        # Absolute paths prevent the bootstrap's chdir from loading the owner's files.
+
         environment = {
             key: value for key, value in os.environ.items()
             if not key.startswith(('TELEGRAM_', 'YANDEX_', 'ICLOUD_', 'GOOGLE_', 'STUDY_', 'DOTENV_'))
@@ -162,7 +162,7 @@ def record():
         saved = json.loads((root / 'config.json').read_text())
         assert saved['profile']['name'] == 'Анна' and saved['profile']['course'] == 2
         assert not saved['chats'] and not saved['ownerId']
-        # Reopen the actual menu to show the persisted profile and its green check.
+
         terminal = Terminal(root)
         try:
             terminal.expect('Сохранено 1/5')
@@ -254,7 +254,7 @@ def render(first_frame, duration):
             durations.append(100)
             last_bytes = raw
         timestamp += interval
-    # One shared palette keeps the blue logo and colored status icons stable.
+
     sample = Image.new('RGB', (width, height * 3))
     for index, source in enumerate([frames[min(3, len(frames) - 1)], frames[len(frames) // 2], frames[-2]]):
         sample.paste(source, (0, index * height))

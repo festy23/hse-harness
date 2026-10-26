@@ -1,0 +1,9 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "singleQuote": true,
+  "printWidth": 100,
+  "semi": true,
+  "tabWidth": 2,
+  "sortImports": false,
+  "ignorePatterns": ["node_modules/**", "dist/**", ".agents/**", "docs/**", "coverage/**", "data/**", "secrets/**", "package-lock.json"]
+}

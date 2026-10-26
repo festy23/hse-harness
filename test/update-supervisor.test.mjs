@@ -1107,7 +1107,7 @@ test('asynchronous send failure promptly rejects matching waiters and stops the 
   assert.deepEqual(signals, ['SIGTERM']);
 });
 
-async function activationWithoutAcknowledgement(home, releases, version) {
+async function activationWithoutAcknowledgement(home, releases, version, prepareDelay = 0) {
   await writeFile(
     join(releases.get(version).packageRoot, 'dist/main.js'),
     `
@@ -1122,10 +1122,10 @@ const stop=cause=>{event(owned&&!settled?'operation-aborted':cause);if(owned){un
 process.on('SIGTERM',()=>stop('stop'));process.on('disconnect',()=>stop('disconnect'));
 process.on('message',message=>{
   context=message;
-  if(message.type==='prepare'){event('prepare');send(message,'boot-ready');}
+  if(message.type==='prepare'){event('prepare');setTimeout(()=>send(message,'boot-ready'),${prepareDelay});}
   if(message.type==='activate'){
     try{writeFileSync(writer,String(process.pid),{flag:'wx'});owned=true;}catch{event('overlap');process.exit(70);}
-    mode='active';event('accepted-operation'); // Admission opened; the activation ACK is deliberately lost.
+    mode='active';event('accepted-operation');send(message,'test-accepted-operation');
   }
   if(message.type==='drain'){mode='draining';event('drain');draining=message;if(settled){mode='quiescent';send(message,'quiescent');}}
   if(message.type==='resume'){draining=undefined;mode='active';event('resume');send(message,'active');}
@@ -1143,10 +1143,34 @@ event('spawn');
   );
 }
 
+function launchWithLostActivationAck(launch, overrides = {}) {
+  const supervisor = launch({
+    ...overrides,
+    spawn(...args) {
+      const child = spawn(...args);
+      child.on('message', (message) => {
+        if (message.type !== 'test-accepted-operation') {
+          return;
+        }
+        const waiter = [...supervisor.waiters].find(
+          (entry) =>
+            entry.worker.child === child &&
+            entry.sequence === message.sequence &&
+            entry.response === 'active',
+        );
+        assert.ok(waiter, 'Accepted operation must still be waiting for its activation ACK');
+        waiter.reject(new Error('Timeout activate'));
+      });
+      return child;
+    },
+  });
+  return supervisor;
+}
+
 test('lost activation ACK cannot SIGTERM or abort an accepted candidate operation during rollback', async () => {
   await fixture(async ({ home, install, state, events, launch, releases }) => {
     await activationWithoutAcknowledgement(home, releases, '0.3.0');
-    launch({ bootMs: 250, deferMs: 40 });
+    launchWithLostActivationAck(launch, { deferMs: 40 });
     await eventually(async () => (await state()).runningVersion === '0.2.0');
     await install('0.3.0');
     await eventually(async () =>
@@ -1189,9 +1213,13 @@ test('lost activation ACK cannot SIGTERM or abort an accepted candidate operatio
 
 test('initial recovery with a lost activation ACK retains the live accepted operation instead of treating it as inactive', async () => {
   await fixture(async ({ home, state, events, launch, releases }) => {
-    await activationWithoutAcknowledgement(home, releases, '0.2.0');
-    const supervisor = launch({ bootMs: 250 });
-    await eventually(async () => (await state()).phase === 'blocked');
+    await activationWithoutAcknowledgement(home, releases, '0.2.0', 350);
+    const supervisor = launchWithLostActivationAck(launch);
+    await Promise.race([
+      eventually(async () => (await state()).phase === 'blocked'),
+      supervisor.testCompletion,
+    ]);
+    assert.equal((await state()).deferredReason, 'Timeout activate');
     assert.equal(supervisor.worker.activationRequested, true);
     assert.equal(supervisor.worker.exited, false);
     const trace = await events();

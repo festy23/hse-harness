@@ -1,0 +1,177 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [
+    "typescript",
+    "import",
+    "oxc"
+  ],
+  "categories": {
+    "correctness": "off"
+  },
+  "options": {
+    "typeAware": true,
+    "denyWarnings": true
+  },
+  "ignorePatterns": [
+    "node_modules/**",
+    "dist/**",
+    ".agents/**",
+    "docs/**",
+    "coverage/**",
+    "data/**",
+    "secrets/**"
+  ],
+  "env": {
+    "node": true,
+    "es2024": true
+  },
+  "rules": {
+    "eqeqeq": [
+      "error",
+      "always"
+    ],
+    "no-debugger": "error",
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error",
+    "no-async-promise-executor": "error",
+    "no-promise-executor-return": "error",
+    "no-await-in-loop": "off",
+    "no-unsafe-finally": "error",
+    "no-constant-binary-expression": "error",
+    "no-constant-condition": [
+      "error",
+      {
+        "checkLoops": false
+      }
+    ],
+    "no-cond-assign": [
+      "error",
+      "always"
+    ],
+    "no-dupe-keys": "error",
+    "no-duplicate-case": "error",
+    "no-unreachable": "error",
+    "no-unreachable-loop": "error",
+    "no-fallthrough": "error",
+    "no-unexpected-multiline": "error",
+    "no-loss-of-precision": "error",
+    "no-sparse-arrays": "error",
+    "no-unsafe-optional-chaining": "error",
+    "no-prototype-builtins": "error",
+    "no-self-assign": "error",
+    "no-self-compare": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "curly": [
+      "error",
+      "all"
+    ],
+    "import/no-cycle": [
+      "error",
+      {
+        "ignoreTypes": true
+      }
+    ],
+    "import/no-self-import": "error",
+    "import/no-duplicates": "error",
+    "typescript/ban-ts-comment": [
+      "error",
+      {
+        "ts-ignore": true,
+        "ts-expect-error": true,
+        "ts-nocheck": true,
+        "ts-check": true
+      }
+    ],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-namespace": "error",
+    "typescript/no-non-null-asserted-optional-chain": "error"
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/*.js",
+        "**/*.mjs",
+        "**/*.cjs"
+      ],
+      "rules": {
+        "no-undef": "error",
+        "no-const-assign": "error"
+      }
+    },
+    {
+      "files": [
+        "src/**/*.ts"
+      ],
+      "rules": {
+        "typescript/no-floating-promises": [
+          "error",
+          {
+            "ignoreVoid": false,
+            "checkThenables": true
+          }
+        ],
+        "typescript/no-misused-promises": "error",
+        "typescript/await-thenable": "error",
+        "typescript/no-unsafe-assignment": "error",
+        "typescript/no-unsafe-argument": "error",
+        "typescript/no-unsafe-call": "error",
+        "typescript/no-unsafe-member-access": "error",
+        "typescript/no-unsafe-return": "error",
+        "typescript/only-throw-error": "error",
+        "typescript/switch-exhaustiveness-check": "error",
+        "typescript/no-misused-new": "error",
+        "typescript/no-for-in-array": "error",
+        "typescript/no-duplicate-type-constituents": "error",
+        "max-depth": [
+          "error",
+          4
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/domain.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": [
+                  "./bot*",
+                  "./telegram*",
+                  "./calendar/*",
+                  "./store*",
+                  "./cli/*",
+                  "./updates/*",
+                  "node:fs*",
+                  "node:http*",
+                  "node:child_process",
+                  "./mail*",
+                  "./main*",
+                  "./cli.*",
+                  "node:fs/**",
+                  "node:http/**",
+                  "node:https/**",
+                  "node:child_process/**",
+                  "fs",
+                  "fs/**",
+                  "http",
+                  "http/**",
+                  "https",
+                  "https/**",
+                  "child_process",
+                  "child_process/**"
+                ],
+                "message": "Domain rules must not depend on transport, storage or application entry points."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

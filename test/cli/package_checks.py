@@ -1,4 +1,3 @@
-"""Configure a real installed CLI through its terminal; no account connections."""
 import fcntl
 import json
 import os

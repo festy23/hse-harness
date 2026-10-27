@@ -1,7 +1,12 @@
 import type { CalendarProvider } from '../config.js';
 
 export type SetupSection = 'profile' | 'telegram' | 'mail' | 'model' | 'calendars';
-export interface Choice { id: string; label: string; hint?: string; writable?: boolean }
+export interface Choice {
+  id: string;
+  label: string;
+  hint?: string;
+  writable?: boolean;
+}
 export interface InputRequest {
   message: string;
   initial?: string;

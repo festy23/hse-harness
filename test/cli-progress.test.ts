@@ -23,24 +23,30 @@ async function childCheck(body: string, interrupt?: NodeJS.Signals): Promise<str
   let output = '';
   let errors = '';
   let sent = false;
-  child.stdout.on('data', chunk => {
+  child.stdout.on('data', (chunk) => {
     output += String(chunk);
     if (interrupt && !sent && output.includes('ACTION STARTED')) {
       sent = true;
       child.kill(interrupt);
     }
   });
-  child.stderr.on('data', chunk => { errors += String(chunk); });
+  child.stderr.on('data', (chunk) => {
+    errors += String(chunk);
+  });
   const timeout = setTimeout(() => child.kill('SIGKILL'), 5_000);
   try {
     const [code, signal] = await once(child, 'close');
     assert.equal(signal, null, `child killed by ${signal}; ${errors}`);
     assert.equal(code, 0, errors);
-    if (interrupt) assert.equal(sent, true, 'signal was not sent to the child');
+    if (interrupt) {
+      assert.equal(sent, true, 'signal was not sent to the child');
+    }
     return output;
   } finally {
     clearTimeout(timeout);
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+    }
   }
 }
 
@@ -63,7 +69,8 @@ test('Progress returns an action value, preserves errors and restores signal lis
 
 for (const interrupt of ['SIGINT', 'SIGTERM'] as const) {
   test(`Progress ${interrupt} waits for action cleanup and converts a late success into cancellation`, async () => {
-    const output = await childCheck(`
+    const output = await childCheck(
+      `
       const initialInt = process.listenerCount('SIGINT');
       const initialTerm = process.listenerCount('SIGTERM');
       let cleaned = false;
@@ -79,7 +86,9 @@ for (const interrupt of ['SIGINT', 'SIGTERM'] as const) {
       assert.equal(process.listenerCount('SIGINT'), initialInt);
       assert.equal(process.listenerCount('SIGTERM'), initialTerm);
       console.log('CANCELLATION CAUGHT');
-    `, interrupt);
+    `,
+      interrupt,
+    );
     assert.match(output, /Отменяю проверку/);
     assert.match(output, /Проверка отменена/);
     assert.ok(output.indexOf('ACTION CLEANED') < output.indexOf('CANCELLATION CAUGHT'));
@@ -88,7 +97,8 @@ for (const interrupt of ['SIGINT', 'SIGTERM'] as const) {
 }
 
 test('Progress cancellation preserves cleanup when an action rejects after abort', async () => {
-  const output = await childCheck(`
+  const output = await childCheck(
+    `
     let cleaned = false;
     await assert.rejects(withProgress('Прерываемая проверка', async signal => {
       console.log('ACTION STARTED');
@@ -98,13 +108,16 @@ test('Progress cancellation preserves cleanup when an action rejects after abort
     }), error => error instanceof SetupCancelled);
     assert.equal(cleaned, true);
     console.log('CANCELLATION CAUGHT');
-  `, 'SIGINT');
+  `,
+    'SIGINT',
+  );
   assert.match(output, /CANCELLATION CAUGHT/);
   assert.doesNotMatch(output, /✓ Прерываемая проверка/);
 });
 
 test('Progress waits for an adapter that ignores its abort signal before returning cancellation', async () => {
-  const output = await childCheck(`
+  const output = await childCheck(
+    `
     let lateWriteFinished = false;
     await assert.rejects(withProgress('Проверка без поддержки abort', async () => {
       console.log('ACTION STARTED');
@@ -115,7 +128,9 @@ test('Progress waits for an adapter that ignores its abort signal before returni
     }), error => error instanceof SetupCancelled);
     assert.equal(lateWriteFinished, true, 'transaction rollback must wait for the last SDK effect');
     console.log('CANCELLATION CAUGHT');
-  `, 'SIGINT');
+  `,
+    'SIGINT',
+  );
   assert.ok(output.indexOf('LATE WRITE FINISHED') < output.indexOf('CANCELLATION CAUGHT'));
   assert.doesNotMatch(output, /✓ Проверка без поддержки abort/);
 });

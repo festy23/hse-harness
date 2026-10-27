@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {ReleaseStore} from '../runtime/releases.mjs';
 import {atomicJSON,readJSON} from '../runtime/storage.mjs';
-import {grantTelegramUpdate,restoreTelegramUpdatePermission,installApprovedPackage} from '../runtime/npm-update.mjs';
+import {grantTelegramUpdate,restoreTelegramUpdatePermission,installApprovedPackage,setAutomaticUpdates} from '../runtime/npm-update.mjs';
 import {updateSettings} from '../runtime/installation.mjs';
 const integrity='sha512-'+Buffer.alloc(64,1).toString('base64');
 const manifest={protocolVersion:1,stateSchemaVersion:2,piVersion:'1.0.2',minSupervisorVersion:'1.0.0',formats:{operations:2,auth:1},writableStateVersion:2};
@@ -35,4 +35,22 @@ test('owner installer verifies before mutation, pins the global prefix, isolates
  const invoked=JSON.parse(await readFile(log));assert.ok(invoked.args.includes('@ivan-boss/hse-harness@0.2.3'));assert.equal(invoked.args[invoked.args.indexOf('--prefix')+1],prefix);assert.ok(invoked.args.includes('--ignore-scripts'));assert.equal(invoked.env.TELEGRAM_BOT_TOKEN,undefined);assert.equal(invoked.env.NODE_OPTIONS,undefined);assert.equal(invoked.user,'');assert.ok(!(await readdir(join(home,'runtime'))).some(x=>x.startsWith('.telegram-install-')));
  ReleaseStore.prototype.prepare=async()=>({version:'0.2.3',integrity,manifest});journal.quarantine=[{version:'0.2.3'}];await atomicJSON(join(home,'runtime/state.json'),journal);
  await installApprovedPackage({home,version:'0.2.3',integrity});assert.equal((await readJSON(join(home,'runtime/settings.json'))).request.action,'retry');
+});
+
+for(const revocation of ['policy','quarantine'])test(`revoking automatic ${revocation} during preparation prevents global npm mutation`,async t=>{
+ const dir=await mkdtemp(join(tmpdir(),'hse-auto-install-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const home=join(dir,'home'),manifestPath=join(dir,'prefix/lib/node_modules/@ivan-boss/hse-harness/package.json');
+ await mkdir(join(dir,'prefix/lib/node_modules/@ivan-boss/hse-harness'),{recursive:true});
+ await writeFile(manifestPath,JSON.stringify({version:'0.2.2'}));
+ await atomicJSON(join(home,'runtime/state.json'),{installation:{manifestPath},active:{version:'0.2.2',manifest},supervisorVersion:'1.0.1',quarantine:[]});
+ await updateSettings(home,{enabled:true});await setAutomaticUpdates(home,true);
+ const previous=ReleaseStore.prototype.prepare;t.after(()=>{ReleaseStore.prototype.prepare=previous;});
+ ReleaseStore.prototype.prepare=async()=>{
+   if(revocation==='policy')await setAutomaticUpdates(home,false);
+   else {const path=join(home,'runtime/state.json');await atomicJSON(path,{...await readJSON(path),quarantine:[{version:'0.2.3'}]});}
+   return {version:'0.2.3',integrity,manifest};
+ };
+ await assert.rejects(installApprovedPackage({home,version:'0.2.3',integrity,automatic:true}),{code:revocation==='policy'?'AUTOMATIC_UPDATES_DISABLED':'AUTOMATIC_UPDATE_HELD'});
+ assert.equal(JSON.parse(await readFile(manifestPath)).version,'0.2.2');
+ assert.ok(!(await readdir(join(home,'runtime'))).some(x=>x.startsWith('.telegram-install-')));
 });

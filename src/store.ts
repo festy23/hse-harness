@@ -8,11 +8,13 @@ import {OperationError,yieldIfNeeded,type OperationContext} from './operations.j
 export interface NpmUpdateState {
   botIdentity?:string;
   checkedAt?:number;
+  checkFailed?:boolean;
   lastOfferedAt?:number;
   latest?:AvailableRelease;
   offer?:AvailableRelease&{id:string};
+  controls?:{id:string;enabled:boolean};
   pendingNotice?:{id:string;text:string;offerId:string;version:string};
-  request?:AvailableRelease&{id:string;workerId:string;phase:'authorizing'|'pending'|'installing'|'awaiting-apply'|'completed'|'failed';created:number};
+  request?:AvailableRelease&{id:string;workerId:string;phase:'authorizing'|'pending'|'installing'|'awaiting-apply'|'completed'|'failed';created:number;automatic?:boolean;cancelled?:boolean};
 }
 
 export interface TaskOperation {
@@ -82,10 +84,14 @@ export class Store {
         if(!update||typeof update!=='object')throw new Error('Invalid npm update state');
         for(const field of ['checkedAt','lastOfferedAt'] as const)if(update[field]!==undefined&&!Number.isFinite(update[field]))throw new Error('Invalid update timestamp');
         if(update.botIdentity!==undefined&&typeof update.botIdentity!=='string')throw new Error('Invalid update bot identity');
+        if(update.checkFailed!==undefined&&typeof update.checkFailed!=='boolean')throw new Error('Invalid update check result');
+        if(update.controls&&(!/^[a-f0-9-]{36}$/.test(update.controls.id)||typeof update.controls.enabled!=='boolean'))throw new Error('Invalid update controls');
         if(update.pendingNotice&&(!update.pendingNotice||typeof update.pendingNotice.id!=='string'||typeof update.pendingNotice.text!=='string'||!stableVersion(update.pendingNotice.version)||typeof update.pendingNotice.offerId!=='string'))throw new Error('Invalid update notification');
         for(const item of [update.latest,update.offer,update.request])if(item!==undefined&&(!item||!stableVersion(item.version)||typeof item.integrity!=='string'||!/^sha512-[A-Za-z0-9+/]{86}==$/.test(item.integrity)))throw new Error('Invalid update release');
         for(const item of [update.offer,update.request])if(item!==undefined&&!/^[a-f0-9-]{36}$/.test(item.id))throw new Error('Invalid update nonce');
         if(update.request&&(!['authorizing','pending','installing','awaiting-apply','completed','failed'].includes(update.request.phase)||typeof update.request.workerId!=='string'||!Number.isFinite(update.request.created)))throw new Error('Invalid update request');
+        if(update.request?.automatic!==undefined&&typeof update.request.automatic!=='boolean')throw new Error('Invalid automatic update request');
+        if(update.request?.cancelled!==undefined&&typeof update.request.cancelled!=='boolean')throw new Error('Invalid cancelled update request');
       }
       const version=(raw as {schemaVersion?:number}).schemaVersion;
       if (version !== undefined && ![1,2].includes(version)) throw new Error('Unsupported operations format');

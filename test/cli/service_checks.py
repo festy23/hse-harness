@@ -1,4 +1,3 @@
-"""Real runner -> npm-like child -> compiler-like grandchild; isolated Unix groups only."""
 import json
 import os
 import select
@@ -24,7 +23,7 @@ def alive(pid):
 
 with tempfile.TemporaryDirectory(prefix='hse-cli-service-') as directory:
     root = Path(directory)
-    # No real environment, credentials, service locks, or Telegram processes are used.
+
     environment = {key: value for key, value in os.environ.items() if not key.startswith(('TELEGRAM_', 'YANDEX_', 'ICLOUD_', 'GOOGLE_', 'STUDY_'))}
     environment.update(DOTENV_CONFIG_PATH=str(root / 'empty.env'), STUDY_CONFIG=str(root / 'config.json'), STUDY_DATA_DIR=str(root / 'data'), STUDY_SECRETS_DIR=str(root / 'secrets'))
 
@@ -83,7 +82,7 @@ console.log('CHILD_READY:'+process.pid);
             assert b'GRAND_READY:' in output, output.decode(errors='replace')
             fixture_group = int(output.split(b'CHILD_READY:')[1].splitlines()[0])
             os.kill(process.pid, value)
-            # A repeated interruption while shutdown is pending must not be forwarded again.
+
             time.sleep(0.025)
             os.kill(process.pid, value)
             remaining, _ = process.communicate(timeout=8)
@@ -97,7 +96,7 @@ console.log('CHILD_READY:'+process.pid);
             assert not alive(child['pid']) and not alive(grand['pid']), 'Runner returned with a surviving fixture descendant'
             completed = True
         finally:
-            # These process groups belong solely to fixtures created above. Never touch the real bot.
+
             if fixture_group is not None and not completed:
                 try:
                     os.killpg(fixture_group, signal.SIGKILL)

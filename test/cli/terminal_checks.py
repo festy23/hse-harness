@@ -1,4 +1,3 @@
-"""Exercise actual terminal prompts in an isolated POSIX pseudo-terminal; no account calls."""
 import fcntl
 import json
 import os
@@ -70,7 +69,7 @@ class Terminal:
 with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
     root = Path(directory)
     cli = str(project / 'scripts/harness.mjs')
-    # Fresh menu chooses configure, cancel during a section returns to the menu.
+
     terminal = Terminal(root, [cli], columns=48)
     terminal.expect('HSE HARNESS')
     terminal.expect('Главное меню')
@@ -86,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
     assert not (root / 'config.json').exists()
     assert b'Enter: confirm' not in terminal.output
 
-    # Complete a real section through prompts and read the actual persisted result.
+
     terminal = Terminal(root, [cli, 'profile'])
     for message, answer in [
         ('Как тебя зовут?', 'Тест'), ('Вуз / факультет', ''),
@@ -101,14 +100,14 @@ with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
     assert json.loads(saved)['profile']['name'] == 'Тест'
     assert json.loads(saved)['profile']['course'] == 2
 
-    # Cancel editing an already saved profile without changing its file.
+
     terminal = Terminal(root, [cli, 'profile'])
     terminal.expect('Как тебя зовут?')
     terminal.send('\x03')
     assert terminal.finish() == 0
     assert (root / 'config.json').read_text() == saved
 
-    # Actual secret prompt masks input; test values must never reach terminal output.
+
     script = "import {terminal} from " + json.dumps(str(project / 'src/cli/terminal.ts')) + "; const value=await terminal.input({message:'Секрет для проверки',secret:true}); console.log('LEN:'+value.length);"
     secret = 'private-test-secret-7343'
     terminal = Terminal(root, ['--input-type=module', '-e', script])
@@ -118,7 +117,7 @@ with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
     assert secret.encode() not in terminal.output
     assert ('LEN:' + str(len(secret))).encode() in terminal.output
 
-    # Cancelling actual animated progress waits for cleanup and rolls credentials back.
+
     script = "import {terminal} from " + json.dumps(str(project / 'src/cli/terminal.ts')) + "; import {SetupState} from " + json.dumps(str(project / 'src/cli/state.ts')) + "; import {SetupCancelled} from " + json.dumps(str(project / 'src/cli/errors.ts')) + "; const state=new SetupState(); await state.load(); await state.env('TEST_TOKEN','old'); try { await state.transaction(async()=>{ await state.env('TEST_TOKEN','new'); await terminal.task('Проверка отмены',async()=>{console.log('PROGRESS_READY');await new Promise(r=>setTimeout(r,200));console.log('ACTION_CLEANED');}); state.config.model='must-not-save';}); throw new Error('Cancellation lost'); } catch(error) {if(!(error instanceof SetupCancelled))throw error; console.log('ROLLED_BACK');}"
     terminal = Terminal(root, ['--input-type=module', '-e', script], columns=48)
     terminal.expect('PROGRESS_READY')
@@ -129,7 +128,7 @@ with tempfile.TemporaryDirectory(prefix='hse-cli-pty-') as directory:
     assert "TEST_TOKEN='old'" in (root / 'empty.env').read_text()
     assert json.loads((root / 'config.json').read_text())['model'] != 'must-not-save'
 
-    # Ctrl+C while the foreground runner owns a child is forwarded once and awaited.
+
     child_script = root / 'child.mjs'
     child_script.write_text("process.once('SIGINT',()=>{console.log('CHILD_STOPPED');setTimeout(()=>process.exit(0),100)}); setInterval(()=>{},1000); console.log('CHILD_READY');")
     runner = "import {runProcess} from " + json.dumps(str(project / 'src/cli/service.ts')) + "; const code=await runProcess(process.execPath,[" + json.dumps(str(child_script)) + "],process.cwd()); console.log('RUNNER_EXIT:'+code);"

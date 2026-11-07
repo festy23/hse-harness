@@ -5,7 +5,24 @@ on:
 permissions:
   contents: read
 jobs:
+  quality:
+    name: Lint, formatting and strict types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+      - run: npm install -g npm@11.17.0
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm run test:quality
   linux:
+    needs: quality
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
@@ -24,7 +41,8 @@ jobs:
           cache: npm
       - run: npm install -g npm@${{ matrix.npm }}
       - run: npm ci
-      - run: npm run check
+      - run: npm test
+      - run: npm run test:runtime
       - run: npm run benchmark:async > "$RUNNER_TEMP/hse-async-benchmark.log"
       - uses: actions/upload-artifact@v7.0.2
         if: always()
@@ -58,7 +76,8 @@ jobs:
           cache: npm
       - run: npm install -g npm@12.2.0
       - run: npm ci
-      - run: npm run check
+      - run: npm test
+      - run: npm run test:runtime
       - run: npm run benchmark:async > "$RUNNER_TEMP/hse-async-benchmark.log"
       - uses: actions/upload-artifact@v7.0.2
         if: always()

@@ -13,10 +13,13 @@ export async function connectModels(ui: SetupUI, reconnect: boolean): Promise<Ch
         async prompt(prompt) {
           try {
             if (prompt.type === 'select') {
-              return await ui.choose(prompt.message, prompt.options.map(option => ({
-                id: option.id,
-                label: option.label,
-              })));
+              return await ui.choose(
+                prompt.message,
+                prompt.options.map((option) => ({
+                  id: option.id,
+                  label: option.label,
+                })),
+              );
             }
             return await ui.input({
               message: prompt.message,
@@ -24,9 +27,9 @@ export async function connectModels(ui: SetupUI, reconnect: boolean): Promise<Ch
               signal: prompt.signal,
             });
           } catch (error) {
-            cancelled = error instanceof SetupCancelled || (
-              prompt.type !== 'select' && Boolean(prompt.signal?.aborted)
-            );
+            cancelled =
+              error instanceof SetupCancelled ||
+              (prompt.type !== 'select' && Boolean(prompt.signal?.aborted));
             throw error;
           }
         },
@@ -44,30 +47,43 @@ export async function connectModels(ui: SetupUI, reconnect: boolean): Promise<Ch
 
     stage = 'catalogue';
     const models = await ui.task('Получаю модели твоей подписки', async (signal?: AbortSignal) => {
-      if (signal?.aborted) throw new SetupCancelled();
+      if (signal?.aborted) {
+        throw new SetupCancelled();
+      }
       const request: typeof fetch = (input, options) => {
-        if (signal?.aborted) throw new SetupCancelled();
+        if (signal?.aborted) {
+          throw new SetupCancelled();
+        }
         return fetch(input, {
           ...options,
-          signal: AbortSignal.any([options?.signal ?? AbortSignal.timeout(20_000), ...(signal ? [signal] : [])]),
+          signal: AbortSignal.any([
+            options?.signal ?? AbortSignal.timeout(20_000),
+            ...(signal ? [signal] : []),
+          ]),
         });
       };
       try {
-        // Native getAuth may rotate tokens. Do not return until that work settles,
-        // so a section rollback cannot be followed by an orphaned auth write.
         const result = await subscriptionModels(runtime, request);
-        if (signal?.aborted) throw new SetupCancelled();
+        if (signal?.aborted) {
+          throw new SetupCancelled();
+        }
         return result;
       } catch (error) {
-        if (signal?.aborted) throw new SetupCancelled();
+        if (signal?.aborted) {
+          throw new SetupCancelled();
+        }
         throw error;
       }
     });
-    return models.map(model => ({ id: model.id, label: model.name, hint: model.id }));
+    return models.map((model) => ({ id: model.id, label: model.name, hint: model.id }));
   } catch (error) {
-    if (cancelled || error instanceof SetupCancelled) throw new SetupCancelled();
-    throw new SetupIssue(stage === 'login'
-      ? 'ChatGPT: не удалось завершить вход. Повтори подключение подписки в меню.'
-      : 'ChatGPT: не удалось получить модели. Проверь соединение; при истёкшем входе подключи подписку заново.');
+    if (cancelled || error instanceof SetupCancelled) {
+      throw new SetupCancelled();
+    }
+    throw new SetupIssue(
+      stage === 'login'
+        ? 'ChatGPT: не удалось завершить вход. Повтори подключение подписки в меню.'
+        : 'ChatGPT: не удалось получить модели. Проверь соединение; при истёкшем входе подключи подписку заново.',
+    );
   }
 }

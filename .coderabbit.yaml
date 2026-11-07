@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  auto_review:
+    enabled: false
+  review_status: false
+  review_progress: false
+  commit_status: false
+chat:
+  auto_reply: false

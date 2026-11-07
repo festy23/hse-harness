@@ -210,6 +210,12 @@ Supervisor раз в 10 секунд наблюдает зарегистриро
 
 Имя пакета — `@ivan-boss/hse-harness`. `bin/hse-harness.mjs` выбирает личный каталог до загрузки конфигурации и вызывает собранный CLI. `prepack` собирает TypeScript и проверяет состав архива по списку `files`. `prepublishOnly` запускает модульные и e2e-проверки. В пакет входят собранное приложение, команда запуска и публичная документация; исходники и тесты самого харнеса, локальные настройки, токены и память в архив не входят. Проверенные runtime-зависимости включены через `bundleDependencies`: версии транзитивных пакетов не меняются при установке. Это также поддерживает npm 12, где опубликованный shrinkwrap уже не учитывается.
 
+Для выпуска открой **Actions → Release production to npm → Run workflow** и выбери `main`. В `version` укажи новую стабильную версию, например `0.3.1`, а в `release_notes` опиши, что поменялось и как. Workflow подставит версию при сборке, проверит установку архива, опубликует его в npm с тегом `latest` и создаст GitHub Release с тегом `v0.3.1` и введённым описанием. Если npm-публикация прошла, а GitHub Release не создался, используй **Re-run failed jobs** в том же запуске.
+
+Перед первым выпуском в настройках пакета npm добавь Trusted Publisher для GitHub Actions. Укажи владельца `festy23`, репозиторий `hse-harness`, файл `release-npm.yml` и окружение `npm-production`. Включи разрешение на прямой `npm publish`. Окружение `npm-production` в настройках GitHub должно разрешать деплой только из `main`. Для первой успешной публикации npm отводит два дня с момента добавления Trusted Publisher. [Документация npm](https://docs.npmjs.com/trusted-publishers/)
+
+Для локальной проверки сборки:
+
 ```sh
 npm run check
 npm run test:e2e
@@ -217,7 +223,6 @@ npm run test:e2e:managed
 npm run test:updates
 npm run test:package
 npm pack --dry-run
-npm publish --access public
 ```
 
 `test:package` устанавливает настоящий архив в отдельный npm prefix без devDependencies, запускает CLI, проверяет сохранение профиля через терминал и прямой запуск/остановку собранного процесса без реальных аккаунтов. Затем прогоняет 13 e2e-сценариев через установленный пакет и его SDK. `test:updates` использует два полных архива, локальный npm-реестр, настоящий npm update и supervisor. `test:e2e:managed` проверяет IPC drain/resume/finish и восстановление штатной Pi-сессии на настоящем SDK с loopback источниками.

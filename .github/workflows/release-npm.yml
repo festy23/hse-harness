@@ -1,0 +1,144 @@
+name: Release production to npm
+run-name: Release production ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable npm version (for example, 0.3.1)
+        required: true
+        type: string
+      release_notes:
+        description: What changed and how (published in GitHub Releases)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-npm-release
+  cancel-in-progress: false
+
+env:
+  NPM_PACKAGE: '@ivan-boss/hse-harness'
+  RELEASE_VERSION: ${{ inputs.version }}
+
+jobs:
+  prepare:
+    name: Build and verify package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Require main in the production repository
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != festy23/hse-harness || "$GITHUB_REF" != refs/heads/main ]]; then
+            echo 'Production releases must run from festy23/hse-harness main.' >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm install -g npm@12.2.0
+      - name: Validate release inputs
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          LATEST_VERSION=$(npm view "$NPM_PACKAGE@latest" version --registry=https://registry.npmjs.org/)
+          export LATEST_VERSION
+          node --input-type=module <<'JS'
+          import { stableVersion } from './runtime/manifest.mjs';
+          import { compareVersions } from './runtime/supervisor.mjs';
+
+          const { RELEASE_VERSION: version, RELEASE_NOTES: notes, LATEST_VERSION: latest } = process.env;
+          if (!stableVersion(version)) throw new Error('Enter a stable version in MAJOR.MINOR.PATCH format.');
+          if (!notes.trim()) throw new Error('Enter release notes.');
+          if (compareVersions(version, latest) <= 0) throw new Error(`Version must be newer than npm latest (${latest}).`);
+          JS
+
+          existing_tag=$(git ls-remote --tags origin "refs/tags/v$RELEASE_VERSION")
+          if [[ -n "$existing_tag" ]]; then
+            echo "Git tag v$RELEASE_VERSION already exists." >&2
+            exit 1
+          fi
+          npm version "$RELEASE_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:e2e
+      - name: Build and test the publishable archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/hse-release"
+          npm pack --json --pack-destination "$RUNNER_TEMP/hse-release" > "$RUNNER_TEMP/hse-release/pack.json"
+          mv "$RUNNER_TEMP"/hse-release/*.tgz "$RUNNER_TEMP/hse-production.tgz"
+          HSE_PACKAGE_ARCHIVE="$RUNNER_TEMP/hse-production.tgz" node --test test/package.test.mjs
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: hse-production-npm
+          path: ${{ runner.temp }}/hse-production.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to npm
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm-production
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - run: npm install -g npm@12.2.0
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: hse-production-npm
+          path: ${{ runner.temp }}/hse-release
+      - name: Publish the verified archive as latest
+        run: |
+          archive="$RUNNER_TEMP/hse-release/hse-production.tgz"
+          if npm publish "$archive" --access public --ignore-scripts --loglevel=error; then
+            exit 0
+          fi
+
+          # A retry can follow a successful upload whose response was lost.
+          expected="sha512-$(openssl dgst -sha512 -binary "$archive" | openssl base64 -A)"
+          published=$(npm view "$NPM_PACKAGE@$RELEASE_VERSION" dist.integrity --prefer-online)
+          if [[ "$published" != "$expected" ]]; then
+            echo 'npm did not publish this archive.' >&2
+            exit 1
+          fi
+          echo 'The verified archive is already published.'
+
+  release:
+    name: Record GitHub release
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create release notes for the published version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          tag="v$RELEASE_VERSION"
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent; then
+            tagged_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$tag" --jq .sha)
+            if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+              echo "Tag $tag points to a different commit." >&2
+              exit 1
+            fi
+          fi
+
+          printf '%s\n' "$RELEASE_NOTES" | gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$tag" --notes-file -

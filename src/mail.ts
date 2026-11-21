@@ -1,10 +1,17 @@
 import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import {runCompute} from './compute/index.js';
-import {budgets,createOperation,OperationError,type OperationContext} from './operations.js';
+import {budgets,createOperation,operationSleep,OperationError,type OperationContext} from './operations.js';
 import { HISTORY_FROM, hash, type Source } from './domain.js';
 import { secret, type Config } from './config.js';
 import type { Store } from './store.js';
 import {guardImapClient,assertImapHealthy} from './imap-session.js';
+
+const transientConnectionCodes=new Set(['ECONNRESET','ECONNREFUSED','EPIPE','ETIMEDOUT','ETIMEOUT','CONNECT_TIMEOUT','EAI_AGAIN','ClosedAfterConnectTLS']);
+function transientConnectionFailure(error:unknown):error is Error&{code:string} {
+  if(!(error instanceof Error)||!('code' in error)||typeof error.code!=='string')return false;
+  if(('authenticationFailed' in error&&error.authenticationFailed)||('tlsFailed' in error&&error.tlsFailed))return false;
+  return transientConnectionCodes.has(error.code);
+}
 
 export function textPart(node:MessageStructureObject|undefined):MessageStructureObject|undefined {
   const stack=node?[node]:[];let html:MessageStructureObject|undefined,count=0;
@@ -26,10 +33,22 @@ export class MailSource {
     finally{ctx.dispose();}
   }
   private async pollSlice(ctx:OperationContext):Promise<{complete:boolean;initialComplete:boolean}> {
-    const client=guardImapClient(new ImapFlow({host:'imap.yandex.ru',port:993,secure:true,logger:false,connectionTimeout:20_000,socketTimeout:30_000,auth:{user:secret('YANDEX_ADDRESS'),pass:secret('YANDEX_APP_PASSWORD')}}));
+    const createClient=()=>guardImapClient(new ImapFlow({host:'imap.yandex.ru',port:993,secure:true,logger:false,connectionTimeout:20_000,socketTimeout:30_000,auth:{user:secret('YANDEX_ADDRESS'),pass:secret('YANDEX_APP_PASSWORD')}}));
+    let client=createClient();
     const cancel=()=>client.close();ctx.signal.addEventListener('abort',cancel,{once:true});
     try {
-      ctx.throwIfAborted();await client.connect();assertImapHealthy(client);
+      ctx.throwIfAborted();
+      for(let attempt=0;;attempt++) {
+        try{await client.connect();ctx.throwIfAborted();assertImapHealthy(client);break;}
+        catch(error) {
+          client.close();ctx.throwIfAborted();
+          if(attempt>=2||!transientConnectionFailure(error))throw error;
+          // Retry setup before mailbox reads or durable writes, using a fresh client
+          // and the original poll budget. The successful path keeps its usual order.
+          console.warn('Почта: повтор подключения IMAP',JSON.stringify({attempt:attempt+2,code:error.code}));
+          await operationSleep(250*2**attempt,ctx);ctx.throwIfAborted();client=createClient();
+        }
+      }
       const folders=this.config.folders.length ? this.config.folders : (await client.list()).filter(f=>!['\\Trash','\\Junk','\\Drafts'].includes(f.specialUse??'')).map(f=>f.path);
       for(const folder of folders) {
         if(!this.continuing())return {complete:false,initialComplete:false};ctx.throwIfAborted();
